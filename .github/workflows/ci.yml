@@ -15,6 +15,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  hawk:
+    name: Hawk
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HAWK_VERSION: 0.1.9
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.97.1
+      - name: Install Hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+      - name: Check public Rust API usage
+        run: cargo +1.97.1 hawk check --target-dir target/hawk -D warnings
+
   quality:
     name: Format and clippy
     runs-on: ubuntu-latest
