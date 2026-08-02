@@ -9,7 +9,9 @@ updates:
       timezone: Asia/Kolkata
     labels:
       - dependencies
-    open-pull-requests-limit: 10
+    assignees:
+      - Subhransu-De
+    open-pull-requests-limit: 999
 
   - package-ecosystem: github-actions
     directory: /
@@ -19,4 +21,6 @@ updates:
       timezone: Asia/Kolkata
     labels:
       - dependencies
-    open-pull-requests-limit: 10
+    assignees:
+      - Subhransu-De
+    open-pull-requests-limit: 999
