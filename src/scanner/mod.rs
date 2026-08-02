@@ -300,7 +300,7 @@ fn apply_process_status(sessions: &mut [Session]) {
     }
 }
 
-pub(crate) fn normalize_path(path: &Path) -> String {
+fn normalize_path(path: &Path) -> String {
     let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     normalized
         .to_string_lossy()
