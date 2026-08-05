@@ -138,7 +138,9 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
                 status_style(session.status),
             )),
             Cell::from(session.title.clone()),
-            Cell::from(relative_time(session.last_activity)),
+            Cell::from(
+                Line::from(relative_time(session.last_activity)).alignment(Alignment::Center),
+            ),
         ])
     });
     let widths = [
@@ -148,9 +150,13 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
     ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "Session", "Activity"])
-                .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD))
-                .bottom_margin(1),
+            Row::new(vec![
+                Cell::from(""),
+                Cell::from("Session"),
+                Cell::from(Line::from("Activity").alignment(Alignment::Center)),
+            ])
+            .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD))
+            .bottom_margin(1),
         )
         .block(
             Block::default()
