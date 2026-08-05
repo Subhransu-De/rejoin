@@ -175,7 +175,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .scan_options
         .scope
         .as_ref()
-        .map(|scope| format!(" folder: {} ", scope.display()))
+        .map(|scope| format!(" {} ", scope.display()))
         .unwrap_or_else(|| " all folders ".to_owned());
     let max_folder_width = (area.width.saturating_mul(45) / 100).max(1);
     let folder = truncate_left(&full_folder, usize::from(max_folder_width));
@@ -561,7 +561,8 @@ mod tests {
     #[test]
     fn footer_shows_folder_without_top_status_bar() {
         let output = render(140, 30, &mut app());
-        assert!(output.contains("folder: workspace/rejoin"));
+        assert!(output.contains("workspace/rejoin"));
+        assert!(!output.contains("folder:"));
         assert!(!output.contains("sessions ·"));
         assert!(!output.contains("sort:"));
     }
