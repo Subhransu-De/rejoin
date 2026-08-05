@@ -20,16 +20,21 @@ const ACCENT: Color = Color::Rgb(122, 162, 247);
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    let command_height = if app.mode == Mode::Search { 3 } else { 1 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(1)])
+        .constraints([Constraint::Min(5), Constraint::Length(command_height)])
         .split(area);
 
     draw_body(frame, app, rows[0]);
-    draw_footer(frame, app, rows[1]);
+    if app.mode == Mode::Search {
+        draw_search(frame, app, rows[1]);
+    } else {
+        draw_footer(frame, app, rows[1]);
+    }
 
     match app.mode {
-        Mode::Search => draw_search(frame, app),
+        Mode::Search => {}
         Mode::Filter => draw_filter(frame, app),
         Mode::Help => draw_help(frame),
         Mode::Handoff => draw_handoff(frame, app),
@@ -221,17 +226,43 @@ fn truncate_left(value: &str, max_width: usize) -> String {
     format!("…{tail}")
 }
 
-fn draw_search(frame: &mut Frame, app: &App) {
-    let area = centered(frame.area(), 70, 3);
-    frame.render_widget(Clear, area);
+fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(" Search all session context ");
+    let input_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(28)])
+        .split(input_area);
+    let query = if app.search.is_empty() {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "type to filter sessions",
+                Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled("█", Style::default().fg(ACCENT)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(ACCENT)),
+            Span::styled(
+                app.search.as_str(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(ACCENT)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(query), columns[0]);
     frame.render_widget(
-        Paragraph::new(format!("{}█", app.search)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT))
-                .title(" Search all session context "),
-        ),
-        area,
+        Paragraph::new("Enter keep   Esc clear ")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        columns[1],
     );
 }
 
@@ -533,6 +564,20 @@ mod tests {
         assert!(output.contains("folder: workspace/rejoin"));
         assert!(!output.contains("sessions ·"));
         assert!(!output.contains("sort:"));
+    }
+
+    #[test]
+    fn search_mode_shows_the_query_in_a_dedicated_input_bar() {
+        let mut app = app();
+        app.mode = Mode::Search;
+        app.search = "cursor".to_owned();
+
+        let output = render(140, 30, &mut app);
+
+        assert!(output.contains("Search all session context"));
+        assert!(output.contains("/ cursor█"));
+        assert!(output.contains("Enter keep"));
+        assert!(output.contains("Esc clear"));
     }
 
     #[test]
