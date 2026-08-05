@@ -6,6 +6,7 @@ description = "A unified terminal session manager for Claude, Codex, Cursor, Pi,
 license = "MIT"
 repository = "https://github.com/Subhransu-De/rejoin"
 readme = "README.md"
+exclude = ["assets/"]
 
 [dependencies]
 anyhow = "1.0"

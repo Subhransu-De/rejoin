@@ -7,7 +7,11 @@
 
 A fast terminal session manager for Claude Code, Codex, Cursor, Pi, and OpenCode.
 
-It finds sessions for the current folder, shows every agent in one dashboard, resumes a selected session, and creates agent-neutral handoffs between tools.
+It finds sessions for the current folder, shows every agent in one dashboard, and resumes a selected session.
+
+## Demo
+
+[![Watch the Rejoin demo](https://raw.githubusercontent.com/Subhransu-De/rejoin/main/assets/rejoin-demo.png)](https://github.com/Subhransu-De/rejoin/blob/main/assets/rejoin-demo.mp4)
 
 ## Install
 
@@ -45,6 +49,10 @@ Use `rejoin --all` to search every discovered session, `rejoin list` for a plain
 | `/` | Search |
 | `f` | Filter |
 | `q` | Quit |
+
+## Roadmap
+
+- [ ] Agent-neutral handoff workflow
 
 ## Build
 
