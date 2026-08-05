@@ -190,35 +190,6 @@ impl Filters {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SortOrder {
-    #[default]
-    Recent,
-    Agent,
-    Project,
-    Status,
-}
-
-impl SortOrder {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Recent => "recent",
-            Self::Agent => "agent",
-            Self::Project => "project",
-            Self::Status => "status",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Recent => Self::Agent,
-            Self::Agent => Self::Project,
-            Self::Project => Self::Status,
-            Self::Status => Self::Recent,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Handoff {
     pub markdown: String,

@@ -22,16 +22,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(1)])
         .split(area);
 
-    draw_header(frame, app, rows[0]);
-    draw_body(frame, app, rows[1]);
-    draw_footer(frame, app, rows[2]);
+    draw_body(frame, app, rows[0]);
+    draw_footer(frame, app, rows[1]);
 
     match app.mode {
         Mode::Search => draw_search(frame, app),
@@ -45,45 +40,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(toast) = &app.toast {
         draw_toast(frame, &toast.message, toast.is_error);
     }
-}
-
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![
-        Span::styled(
-            " rejoin ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "  {} sessions · {} active",
-            app.sessions.len(),
-            app.active_count()
-        )),
-    ];
-    if !app.search.is_empty() {
-        spans.push(chip(format!("/{}", app.search)));
-    }
-    if let Some(scope) = &app.scan_options.scope {
-        spans.push(chip(format!("folder:{}", scope.display())));
-    } else {
-        spans.push(chip("all folders"));
-    }
-    if !app.filters.project.is_empty() {
-        spans.push(chip(format!("project:{}", app.filters.project)));
-    }
-    if !app.filters.repository.is_empty() {
-        spans.push(chip(format!("repo:{}", app.filters.repository)));
-    }
-    if app.filters.recency != crate::model::Recency::Any {
-        spans.push(chip(app.filters.recency.label()));
-    }
-    spans.push(Span::styled(
-        format!("  sort:{}", app.sort.label()),
-        Style::default().fg(MUTED),
-    ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -210,7 +166,21 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let full_folder = app
+        .scan_options
+        .scope
+        .as_ref()
+        .map(|scope| format!(" folder: {} ", scope.display()))
+        .unwrap_or_else(|| " all folders ".to_owned());
+    let max_folder_width = (area.width.saturating_mul(45) / 100).max(1);
+    let folder = truncate_left(&full_folder, usize::from(max_folder_width));
+    let folder_width = folder.chars().count() as u16;
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(folder_width)])
+        .split(area);
     let content = match app.mode {
+        Mode::Normal if columns[0].width < 100 => " ↑↓   Ctrl+←→   ↵ resume   h handoff ",
         Mode::Normal => {
             " ↑/↓ session   Ctrl+arrows panel   ↵ resume   h handoff   x launch   / search   f filter   ? help   q quit "
         }
@@ -220,14 +190,35 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Handoff => " ↑↓ scroll   c copy   w write   x choose receiving agent   Esc close ",
         Mode::ConfirmLaunch => " ←→ choose agent   ↵ launch with handoff   Esc review ",
     };
+    let footer_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(180, 190, 210));
+    frame.render_widget(Block::default().style(footer_style), area);
+    frame.render_widget(Paragraph::new(content).style(footer_style), columns[0]);
     frame.render_widget(
-        Paragraph::new(content).style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(180, 190, 210)),
-        ),
-        area,
+        Paragraph::new(folder)
+            .alignment(Alignment::Right)
+            .style(footer_style),
+        columns[1],
     );
+}
+
+fn truncate_left(value: &str, max_width: usize) -> String {
+    if value.chars().count() <= max_width {
+        return value.to_owned();
+    }
+    if max_width <= 1 {
+        return "…".chars().take(max_width).collect();
+    }
+    let tail = value
+        .chars()
+        .rev()
+        .take(max_width - 1)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("…{tail}")
 }
 
 fn draw_search(frame: &mut Frame, app: &App) {
@@ -294,7 +285,7 @@ Actions\n\
   h             preview handoff       r             rescan local stores\n\n\
 Find\n\
   /             search all context    f             structured filters\n\
-  s             cycle sort            Esc           clear search/filters\n\n\
+  Esc           clear search/filters\n\n\
 Handoff\n\
   c             copy Markdown         w             save in working directory\n\
   x             choose any other agent for the reviewed package\n\n\
@@ -429,15 +420,6 @@ fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     )
 }
 
-fn chip(text: impl Into<String>) -> Span<'static> {
-    Span::styled(
-        format!(" [{}]", text.into()),
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Rgb(150, 160, 180)),
-    )
-}
-
 fn agent_style(agent: Agent) -> Style {
     Style::default().fg(match agent {
         Agent::Claude => CLAUDE,
@@ -468,7 +450,7 @@ mod tests {
 
     use super::*;
     use crate::app::Mode;
-    use crate::model::{Filters, Handoff, SortOrder};
+    use crate::model::{Filters, Handoff};
     use crate::scanner::ScanOptions;
 
     fn app() -> App {
@@ -505,7 +487,6 @@ mod tests {
             filters: Filters::default(),
             draft_filters: Filters::default(),
             filter_field: 0,
-            sort: SortOrder::Recent,
             mode: Mode::Normal,
             handoff: None,
             handoff_scroll: 0,
@@ -544,6 +525,14 @@ mod tests {
         assert!(output.contains("Claude (1)"));
         assert!(output.contains("resume"));
         assert!(output.contains("handoff"));
+    }
+
+    #[test]
+    fn footer_shows_folder_without_top_status_bar() {
+        let output = render(140, 30, &mut app());
+        assert!(output.contains("folder: workspace/rejoin"));
+        assert!(!output.contains("sessions ·"));
+        assert!(!output.contains("sort:"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::handoff;
 use crate::launch::{LaunchKind, LaunchRequest};
-use crate::model::{Agent, Filters, Handoff, Session, SortOrder};
+use crate::model::{Agent, Filters, Handoff, Session};
 use crate::scanner::{self, ScanOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,7 +57,6 @@ pub struct App {
     pub filters: Filters,
     pub draft_filters: Filters,
     pub filter_field: usize,
-    pub sort: SortOrder,
     pub mode: Mode,
     pub handoff: Option<Handoff>,
     pub handoff_scroll: u16,
@@ -79,7 +78,6 @@ impl App {
             filters: Filters::default(),
             draft_filters: Filters::default(),
             filter_field: 0,
-            sort: SortOrder::default(),
             mode: Mode::Normal,
             handoff: None,
             handoff_scroll: 0,
@@ -135,13 +133,6 @@ impl App {
         self.sessions
             .iter()
             .filter(|session| session.agent == agent)
-            .count()
-    }
-
-    pub fn active_count(&self) -> usize {
-        self.sessions
-            .iter()
-            .filter(|session| session.status == crate::model::SessionStatus::Active)
             .count()
     }
 
@@ -238,13 +229,6 @@ impl App {
                 self.draft_filters = self.filters.clone();
                 self.filter_field = 0;
                 self.mode = Mode::Filter;
-                AppAction::None
-            }
-            KeyCode::Char('s') => {
-                self.sort = self.sort.next();
-                self.selected = 0;
-                self.hydrate_selected_preview();
-                self.toast = Some(Toast::new(format!("Sort: {}", self.sort.label()), false));
                 AppAction::None
             }
             KeyCode::Char('r') => {
@@ -564,24 +548,7 @@ impl App {
 
     fn compare_sessions(&self, left: &Session, right: &Session) -> Ordering {
         let active_order = status_rank(left).cmp(&status_rank(right));
-        match self.sort {
-            SortOrder::Recent => {
-                active_order.then_with(|| right.last_activity.cmp(&left.last_activity))
-            }
-            SortOrder::Agent => left
-                .agent
-                .label()
-                .cmp(right.agent.label())
-                .then_with(|| right.last_activity.cmp(&left.last_activity)),
-            SortOrder::Project => left
-                .project
-                .to_lowercase()
-                .cmp(&right.project.to_lowercase())
-                .then_with(|| right.last_activity.cmp(&left.last_activity)),
-            SortOrder::Status => {
-                active_order.then_with(|| right.last_activity.cmp(&left.last_activity))
-            }
-        }
+        active_order.then_with(|| right.last_activity.cmp(&left.last_activity))
     }
 }
 
