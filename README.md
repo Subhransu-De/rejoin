@@ -54,6 +54,10 @@ Use `rejoin --all` to search every discovered session, `rejoin list` for a plain
 
 - [ ] Agent-neutral handoff workflow
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for features, fixes, and performance improvements in each release.
+
 ## Build
 
 ```sh

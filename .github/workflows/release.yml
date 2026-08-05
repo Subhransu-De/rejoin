@@ -56,8 +56,8 @@ jobs:
           host="$(rustc -vV | sed -n 's/^host: //p')"
           archive="rejoin-${GITHUB_REF_NAME}-${host}.tar.gz"
           mkdir -p dist/package
-          cp target/release/rejoin LICENSE README.md dist/package/
-          tar -C dist/package -czf "dist/$archive" rejoin LICENSE README.md
+          cp target/release/rejoin LICENSE README.md CHANGELOG.md dist/package/
+          tar -C dist/package -czf "dist/$archive" rejoin LICENSE README.md CHANGELOG.md
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "$archive" > "$archive.sha256")
           else
@@ -72,7 +72,7 @@ jobs:
           $packageDir = Join-Path $PWD 'dist/package'
           $archivePath = Join-Path $PWD "dist/$archiveName"
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item target/release/rejoin.exe, LICENSE, README.md -Destination $packageDir
+          Copy-Item target/release/rejoin.exe, LICENSE, README.md, CHANGELOG.md -Destination $packageDir
           Compress-Archive -Path "$packageDir/*" -DestinationPath $archivePath
           $hash = (Get-FileHash -Algorithm SHA256 $archivePath).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText("$archivePath.sha256", "$hash  $archiveName`n")
