@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -9,13 +8,14 @@ use serde_json::Value;
 use crate::model::{Agent, Session, SessionStatus};
 
 use super::common::{clean_text, head_values, message_text, tail_values, useful_user_text};
-use super::{jsonl_files, parallel_map};
+use super::parallel_map;
 
 pub fn scan(home: &Path, scope: Option<&Path>) -> Result<Vec<Session>> {
     if !home.join("chats").exists() {
         return Ok(Vec::new());
     }
-    let mut transcripts = None;
+    let normalized_scope = scope.map(super::normalize_path);
+    let mut transcript_roots = None;
     let mut sessions = Vec::new();
     let metadata = parallel_map(named_files(&home.join("chats"), "meta.json")?, |path| {
         let id = path
@@ -36,19 +36,17 @@ pub fn scan(home: &Path, scope: Option<&Path>) -> Result<Vec<Session>> {
             continue;
         }
         let cwd = wsl_to_windows(&meta.cwd);
-        if scope.is_some_and(|scope| super::normalize_path(scope) != super::normalize_path(&cwd)) {
+        if normalized_scope
+            .as_ref()
+            .is_some_and(|scope| scope != &super::normalize_path(&cwd))
+        {
             continue;
         }
-        if transcripts.is_none() {
-            transcripts = Some(transcript_map(&home.join("projects"))?);
-        }
-        let transcripts = transcripts
+        let roots = transcript_roots
+            .get_or_insert_with(|| find_transcript_roots(&home.join("projects")))
             .as_ref()
-            .expect("Cursor transcript map initialized");
-        let transcript = transcripts
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| path.clone());
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+        let transcript = resolve_transcript_in_roots(&path, &id, roots);
         let title = meta
             .title
             .filter(|title| !title.trim().is_empty())
@@ -88,6 +86,45 @@ pub(crate) fn load_preview(path: &Path) -> Result<String> {
         .unwrap_or_default())
 }
 
+pub(crate) fn resolve_transcript(path: &Path, session_id: &str) -> Result<PathBuf> {
+    if !path.file_name().is_some_and(|name| name == "meta.json") {
+        return Ok(path.to_path_buf());
+    }
+    let Some(cursor_home) = path
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "chats"))
+        .and_then(Path::parent)
+    else {
+        return Ok(path.to_path_buf());
+    };
+    let roots = find_transcript_roots(&cursor_home.join("projects"))?;
+    Ok(resolve_transcript_in_roots(path, session_id, &roots))
+}
+
+fn find_transcript_roots(projects: &Path) -> Result<Vec<PathBuf>> {
+    if !projects.exists() {
+        return Ok(Vec::new());
+    }
+    let mut roots = Vec::new();
+    for entry in std::fs::read_dir(projects)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            roots.push(entry.path().join("agent-transcripts"));
+        }
+    }
+    Ok(roots)
+}
+
+fn resolve_transcript_in_roots(path: &Path, session_id: &str, roots: &[PathBuf]) -> PathBuf {
+    for root in roots {
+        let candidate = root.join(session_id).join(format!("{session_id}.jsonl"));
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 fn first_user(path: &Path) -> Result<Option<String>> {
     if path.file_name().is_some_and(|name| name == "meta.json") {
         return Ok(None);
@@ -98,20 +135,6 @@ fn first_user(path: &Path) -> Result<Option<String>> {
         .filter_map(|value| value.get("message").and_then(message_text))
         .find(|text| useful_user_text(text))
         .map(|text| clean_text(&text, 72)))
-}
-
-fn transcript_map(root: &Path) -> Result<HashMap<String, PathBuf>> {
-    let mut map = HashMap::new();
-    for path in jsonl_files(root)? {
-        if path
-            .components()
-            .any(|component| component.as_os_str() == "agent-transcripts")
-            && let Some(id) = path.file_stem()
-        {
-            map.insert(id.to_string_lossy().into_owned(), path);
-        }
-    }
-    Ok(map)
 }
 
 fn named_files(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
@@ -125,10 +148,13 @@ fn named_files(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
 
 fn visit_named(directory: &Path, name: &str, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(directory)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
             visit_named(&path, name, files)?;
-        } else if path.file_name().is_some_and(|file_name| file_name == name) {
+        } else if file_type.is_file() && path.file_name().is_some_and(|file_name| file_name == name)
+        {
             files.push(path);
         }
     }
@@ -164,6 +190,8 @@ struct CursorMeta {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -171,6 +199,33 @@ mod tests {
         assert_eq!(
             wsl_to_windows("/mnt/x/workspace/project"),
             PathBuf::from(r"X:\workspace\project")
+        );
+    }
+
+    #[test]
+    fn resolves_transcript_lazily_from_cursor_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let metadata = directory
+            .path()
+            .join("chats")
+            .join("workspace")
+            .join("session-id")
+            .join("meta.json");
+        let transcript = directory
+            .path()
+            .join("projects")
+            .join("project")
+            .join("agent-transcripts")
+            .join("session-id")
+            .join("session-id.jsonl");
+        fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&metadata, "{}").unwrap();
+        fs::write(&transcript, "{}\n").unwrap();
+
+        assert_eq!(
+            resolve_transcript(&metadata, "session-id").unwrap(),
+            transcript
         );
     }
 }

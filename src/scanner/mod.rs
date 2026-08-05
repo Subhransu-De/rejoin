@@ -77,65 +77,93 @@ pub struct ScanResult {
 pub fn scan(options: &ScanOptions) -> ScanResult {
     let started = Instant::now();
     let mut result = ScanResult::default();
+    let cache_started = Instant::now();
     let cache = SessionCache::load();
+    profile("cache load", cache_started);
 
-    let claude_started = Instant::now();
-    match claude::scan(&options.claude_home, &cache) {
-        Ok(mut sessions) => result.sessions.append(&mut sessions),
-        Err(error) => result.warnings.push(format!("Claude: {error:#}")),
+    let (scans, process_snapshot) = std::thread::scope(|scope| {
+        let claude = scope.spawn(|| {
+            let stage = Instant::now();
+            let sessions = claude::scan(&options.claude_home, &cache);
+            profile("claude", stage);
+            sessions
+        });
+        let codex = scope.spawn(|| {
+            let stage = Instant::now();
+            let sessions = codex::scan(&options.codex_home, &cache);
+            profile("codex", stage);
+            sessions
+        });
+        let cursor = scope.spawn(|| {
+            let stage = Instant::now();
+            let sessions = cursor::scan(&options.cursor_home, options.scope.as_deref());
+            profile("cursor", stage);
+            sessions
+        });
+        let pi = scope.spawn(|| {
+            let stage = Instant::now();
+            let sessions = pi::scan(&options.pi_sessions, &cache);
+            profile("pi", stage);
+            sessions
+        });
+        let opencode = scope.spawn(|| {
+            let stage = Instant::now();
+            let sessions = opencode::scan(&options.opencode_database);
+            profile("opencode", stage);
+            sessions
+        });
+        let processes = scope.spawn(|| {
+            let stage = Instant::now();
+            let snapshot = scan_agent_processes();
+            profile("process scan", stage);
+            snapshot
+        });
+        (
+            [
+                ("Claude", claude.join().expect("Claude scanner panicked")),
+                ("Codex", codex.join().expect("Codex scanner panicked")),
+                ("Cursor", cursor.join().expect("Cursor scanner panicked")),
+                ("Pi", pi.join().expect("Pi scanner panicked")),
+                (
+                    "OpenCode",
+                    opencode.join().expect("OpenCode scanner panicked"),
+                ),
+            ],
+            processes.join().expect("process scanner panicked"),
+        )
+    });
+    for (agent, scan) in scans {
+        match scan {
+            Ok(mut sessions) => result.sessions.append(&mut sessions),
+            Err(error) => result.warnings.push(format!("{agent}: {error:#}")),
+        }
     }
-    profile("claude", claude_started);
 
-    let codex_started = Instant::now();
-    match codex::scan(&options.codex_home, &cache) {
-        Ok(mut sessions) => result.sessions.append(&mut sessions),
-        Err(error) => result.warnings.push(format!("Codex: {error:#}")),
-    }
-    profile("codex", codex_started);
-
-    let cursor_started = Instant::now();
-    match cursor::scan(&options.cursor_home, options.scope.as_deref()) {
-        Ok(mut sessions) => result.sessions.append(&mut sessions),
-        Err(error) => result.warnings.push(format!("Cursor: {error:#}")),
-    }
-    profile("cursor", cursor_started);
-
-    let pi_started = Instant::now();
-    match pi::scan(&options.pi_sessions, &cache) {
-        Ok(mut sessions) => result.sessions.append(&mut sessions),
-        Err(error) => result.warnings.push(format!("Pi: {error:#}")),
-    }
-    profile("pi", pi_started);
-
-    let opencode_started = Instant::now();
-    match opencode::scan(&options.opencode_database) {
-        Ok(mut sessions) => result.sessions.append(&mut sessions),
-        Err(error) => result.warnings.push(format!("OpenCode: {error:#}")),
-    }
-    profile("opencode", opencode_started);
-
+    let cache_started = Instant::now();
     if let Err(error) = cache.save_if_dirty(&result.sessions) {
         result.warnings.push(format!("Cache: {error:#}"));
     }
+    profile("cache save", cache_started);
 
     if let Some(scope) = &options.scope {
-        let scope = normalize_path(scope);
-        result
-            .sessions
-            .retain(|session| normalize_path(&session.cwd) == scope);
+        let scope_started = Instant::now();
+        retain_scope(&mut result.sessions, scope);
+        profile("folder scope", scope_started);
     }
 
     let repository_started = Instant::now();
     enrich_repository_metadata(&mut result.sessions);
     profile("repositories", repository_started);
 
-    let process_started = Instant::now();
-    apply_process_status(&mut result.sessions);
-    profile("processes", process_started);
+    let status_started = Instant::now();
+    apply_process_status(&mut result.sessions, &process_snapshot);
+    profile("statuses", status_started);
 
+    let sort_started = Instant::now();
     result
         .sessions
         .sort_by_key(|session| Reverse(session.last_activity));
+    profile("sort", sort_started);
     profile("total", started);
     result
 }
@@ -147,7 +175,10 @@ pub fn load_preview(session: &mut Session) -> Result<()> {
     session.preview = match session.agent {
         Agent::Claude => claude::load_preview(&session.transcript)?,
         Agent::Codex => codex::load_preview(&session.transcript)?,
-        Agent::Cursor => cursor::load_preview(&session.transcript)?,
+        Agent::Cursor => {
+            session.transcript = cursor::resolve_transcript(&session.transcript, &session.id)?;
+            cursor::load_preview(&session.transcript)?
+        }
         Agent::Pi => pi::load_preview(&session.transcript)?,
         Agent::OpenCode => opencode::load_preview(&session.transcript, &session.id)?,
     };
@@ -198,7 +229,13 @@ fn discover_repository(cwd: &Path) -> (Option<String>, Option<PathBuf>) {
     (None, None)
 }
 
-fn apply_process_status(sessions: &mut [Session]) {
+#[derive(Debug, Default)]
+struct ProcessSnapshot {
+    commands: Vec<String>,
+    live_workspaces: HashSet<(Agent, String)>,
+}
+
+fn scan_agent_processes() -> ProcessSnapshot {
     let process_list = ProcessRefreshKind::nothing().without_tasks();
     let mut system =
         System::new_with_specifics(RefreshKind::nothing().with_processes(process_list));
@@ -224,8 +261,7 @@ fn apply_process_status(sessions: &mut [Session]) {
             .with_cmd(UpdateKind::OnlyIfNotSet);
         system.refresh_processes_specifics(ProcessesToUpdate::Some(&agent_pids), false, details);
     }
-    let mut exact_ids = HashSet::new();
-    let mut live_workspaces: HashSet<(Agent, String)> = HashSet::new();
+    let mut snapshot = ProcessSnapshot::default();
 
     for process in system.processes().values() {
         let name = process.name().to_string_lossy().to_lowercase();
@@ -260,21 +296,43 @@ fn apply_process_status(sessions: &mut [Session]) {
                         .unwrap_or_else(|| "<unavailable>".to_owned())
                 );
             }
-            for session in sessions.iter() {
-                if command.contains(&session.id) {
-                    exact_ids.insert(session.id.clone());
-                }
-            }
+            snapshot.commands.push(command);
             if let Some(cwd) = process.cwd() {
-                live_workspaces.insert((agent, normalize_path(cwd)));
+                snapshot
+                    .live_workspaces
+                    .insert((agent, normalize_path(cwd)));
             }
         }
     }
+    snapshot
+}
+
+fn apply_process_status(sessions: &mut [Session], snapshot: &ProcessSnapshot) {
+    let exact_ids = sessions
+        .iter()
+        .filter(|session| {
+            snapshot
+                .commands
+                .iter()
+                .any(|command| command.contains(&session.id))
+        })
+        .map(|session| session.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut normalized_cwds = HashMap::<PathBuf, String>::new();
+    let session_workspaces = sessions
+        .iter()
+        .map(|session| {
+            let normalized = normalized_cwds
+                .entry(session.cwd.clone())
+                .or_insert_with(|| normalize_path(&session.cwd));
+            (session.agent, normalized.clone())
+        })
+        .collect::<Vec<_>>();
 
     let mut newest_by_workspace: HashMap<(Agent, String), usize> = HashMap::new();
-    for (index, session) in sessions.iter().enumerate() {
-        let key = (session.agent, normalize_path(&session.cwd));
-        if live_workspaces.contains(&key) {
+    for (index, (session, key)) in sessions.iter().zip(session_workspaces).enumerate() {
+        if snapshot.live_workspaces.contains(&key) {
             newest_by_workspace
                 .entry(key)
                 .and_modify(|current| {
@@ -286,18 +344,31 @@ fn apply_process_status(sessions: &mut [Session]) {
         }
     }
     let inferred_active: HashSet<usize> = newest_by_workspace.into_values().collect();
+    let now = chrono::Utc::now();
 
     for (index, session) in sessions.iter_mut().enumerate() {
         if session.parse_error.is_some() {
             session.status = SessionStatus::Error;
         } else if exact_ids.contains(&session.id) || inferred_active.contains(&index) {
             session.status = SessionStatus::Active;
-        } else if chrono::Utc::now() - session.last_activity <= Duration::days(1) {
+        } else if now - session.last_activity <= Duration::days(1) {
             session.status = SessionStatus::Idle;
         } else {
             session.status = SessionStatus::Stale;
         }
     }
+}
+
+fn retain_scope(sessions: &mut Vec<Session>, scope: &Path) {
+    let normalized_scope = normalize_path(scope);
+    let matching_cwds = sessions
+        .iter()
+        .map(|session| session.cwd.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|cwd| normalize_path(cwd) == normalized_scope)
+        .collect::<HashSet<_>>();
+    sessions.retain(|session| matching_cwds.contains(&session.cwd));
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -507,14 +578,16 @@ fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
             if path.file_name().is_some_and(|name| name == "subagents") {
                 continue;
             }
             visit(&path, files)?;
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "jsonl")
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
         {
             files.push(path);
         }
