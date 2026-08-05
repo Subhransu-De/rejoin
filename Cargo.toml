@@ -3,10 +3,18 @@ name = "rejoin"
 version = "0.1.0"
 edition = "2024"
 description = "A unified terminal session manager for Claude, Codex, Cursor, Pi, and OpenCode"
+authors = ["rejoin contributors"]
 license = "MIT"
 repository = "https://github.com/Subhransu-De/rejoin"
+homepage = "https://github.com/Subhransu-De/rejoin"
 readme = "README.md"
 exclude = ["assets/"]
+
+[package.metadata.wix]
+upgrade-guid = "2B1AEDF4-854B-4029-88C2-F184B63A4D9F"
+path-guid = "3C7FEC86-510E-4B4B-9CBB-70BE916B75DA"
+license = "LICENSE"
+eula = false
 
 [dependencies]
 anyhow = "1.0"

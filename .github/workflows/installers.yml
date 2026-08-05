@@ -1,0 +1,262 @@
+name: Installer validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/installers.yml"
+      - "packaging/**"
+      - "wix/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows MSI
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - run: rustup default stable
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --version 0.3.9 --locked
+      - name: Find WiX Toolset
+        shell: pwsh
+        run: |
+          $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+          if ($candle) {
+            $wixBin = Split-Path $candle.Source
+          } elseif ($env:WIX -and (Test-Path (Join-Path $env:WIX 'bin/candle.exe'))) {
+            $wixBin = Join-Path $env:WIX 'bin'
+          } else {
+            $candlePath = Get-ChildItem 'C:\Program Files (x86)' -Recurse -Filter candle.exe |
+              Where-Object FullName -Like '*WiX Toolset v3*\bin\candle.exe' |
+              Select-Object -First 1 -ExpandProperty FullName
+            if (-not $candlePath) {
+              throw 'WiX Toolset v3 was not found on the runner.'
+            }
+            $wixBin = Split-Path $candlePath
+          }
+          "REJOIN_WIX_BIN=$wixBin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Output "Using WiX from $wixBin"
+      - name: Build statically linked Windows binary
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = '-C target-feature=+crt-static'
+          cargo build --release --locked
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -EQ 'rejoin').version
+          New-Item -ItemType Directory -Force dist | Out-Null
+          cargo wix --no-build --nocapture `
+            --bin-path $env:REJOIN_WIX_BIN `
+            --target-bin-dir (Join-Path $PWD 'target/release') `
+            --output "dist/rejoin-$version-windows-x64.msi"
+      - name: Smoke-test MSI install and uninstall
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -EQ 'rejoin').version
+          $msi = (Get-ChildItem dist -Filter '*.msi').FullName
+          $installed = Join-Path $env:ProgramFiles 'rejoin/bin/rejoin.exe'
+
+          $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', "`"$msi`"", '/qn', '/norestart'
+          )
+          if ($install.ExitCode -notin 0, 3010) {
+            throw "MSI installation failed with exit code $($install.ExitCode)."
+          }
+          if (-not (Test-Path -LiteralPath $installed)) {
+            throw "MSI did not install $installed."
+          }
+          $actual = & $installed --version
+          if ($actual -ne "rejoin $version") {
+            throw "Installed executable reported '$actual'."
+          }
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          if ($machinePath -notlike '*\rejoin\bin*') {
+            throw 'The MSI did not add rejoin to the machine PATH.'
+          }
+
+          $uninstall = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/x', "`"$msi`"", '/qn', '/norestart'
+          )
+          if ($uninstall.ExitCode -notin 0, 3010) {
+            throw "MSI uninstallation failed with exit code $($uninstall.ExitCode)."
+          }
+          if (Test-Path -LiteralPath $installed) {
+            throw 'The MSI left rejoin.exe behind after uninstall.'
+          }
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          if ($machinePath -like '*\rejoin\bin*') {
+            throw 'The MSI left its PATH entry behind after uninstall.'
+          }
+      - name: Write checksum
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem dist -Filter '*.msi'
+          $hash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$($msi.FullName).sha256", "$hash  $($msi.Name)`n")
+      - name: Attest installers
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - name: Upload MSI
+        uses: actions/upload-artifact@v7
+        with:
+          name: rejoin-installer-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Linux DEB and RPM
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - run: rustup default stable
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Install nFPM
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/nfpm-bin"
+          GOBIN="$RUNNER_TEMP/nfpm-bin" \
+            go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          echo "$RUNNER_TEMP/nfpm-bin" >> "$GITHUB_PATH"
+      - name: Build DEB and RPM
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "rejoin") | .version')"
+          echo "REJOIN_VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p dist
+          REJOIN_VERSION="$version" nfpm package \
+            --config packaging/nfpm.yaml \
+            --packager deb \
+            --target "dist/rejoin_${version}_amd64.deb"
+          REJOIN_VERSION="$version" nfpm package \
+            --config packaging/nfpm.yaml \
+            --packager rpm \
+            --target "dist/rejoin-${version}-1.x86_64.rpm"
+      - name: Smoke-test Debian package
+        shell: bash
+        run: |
+          sudo dpkg --install dist/*.deb
+          test "$(/usr/bin/rejoin --version)" = "rejoin $REJOIN_VERSION"
+          sudo dpkg --remove rejoin
+          test ! -e /usr/bin/rejoin
+      - name: Smoke-test RPM package
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$PWD/dist:/packages:ro" \
+            --env "REJOIN_VERSION=$REJOIN_VERSION" \
+            fedora:latest \
+            bash -euxo pipefail -c '
+              dnf install -y /packages/*.rpm
+              test "$(rejoin --version)" = "rejoin $REJOIN_VERSION"
+              dnf remove -y rejoin
+              ! command -v rejoin
+            '
+      - name: Write checksums
+        shell: bash
+        run: |
+          cd dist
+          for package in *.deb *.rpm; do
+            sha256sum "$package" > "$package.sha256"
+          done
+      - name: Attest installers
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: rejoin-installers-linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS PKG
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - run: rustup default stable
+      - name: Build unsigned universal PKG
+        shell: bash
+        run: bash packaging/build-macos-pkg.sh dist
+      - name: Inspect and smoke-test PKG
+        shell: bash
+        run: |
+          package="$(find dist -maxdepth 1 -name '*.pkg' -print -quit)"
+          version="$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "rejoin") | .version')"
+          if pkgutil --check-signature "$package"; then
+            echo "PKG is signed."
+          else
+            echo "PKG is unsigned as expected for validation."
+          fi
+          pkgutil --payload-files "$package" | grep -Fx './usr/local/bin/rejoin'
+          test ! -e /usr/local/bin/rejoin
+          sudo installer -pkg "$package" -target /
+          test "$(/usr/local/bin/rejoin --version)" = "rejoin $version"
+          sudo rm -f /usr/local/bin/rejoin
+          sudo rm -f \
+            /usr/local/share/doc/rejoin/LICENSE \
+            /usr/local/share/doc/rejoin/README.md \
+            /usr/local/share/doc/rejoin/CHANGELOG.md
+          sudo rmdir /usr/local/share/doc/rejoin
+          sudo pkgutil --forget dev.rejoin.cli
+      - name: Attest installer
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - name: Upload PKG
+        uses: actions/upload-artifact@v7
+        with:
+          name: rejoin-installer-macos-unsigned
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
