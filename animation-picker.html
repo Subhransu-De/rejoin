@@ -1,0 +1,1247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A local animation picker for the Rejoin terminal session manager."
+    />
+    <title>Rejoin animation picker</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --background: #11111b;
+        --surface: #181825;
+        --surface-raised: #1e1e2e;
+        --surface-selected: #20283a;
+        --border: #45475a;
+        --border-soft: #313244;
+        --text: #cdd6f4;
+        --muted: #7f849c;
+        --faint: #585b70;
+        --accent: #35d0c5;
+        --accent-soft: rgb(53 208 197 / 14%);
+        --yellow: #f9e2af;
+        --shadow: rgb(0 0 0 / 28%);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(
+            circle at 15% 0%,
+            rgb(53 208 197 / 8%),
+            transparent 32rem
+          ),
+          var(--background);
+        color: var(--text);
+        font-family:
+          "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+      }
+
+      button,
+      select,
+      input {
+        font: inherit;
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 38px 0 60px;
+      }
+
+      .eyebrow {
+        margin: 0 0 10px;
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 5vw, 48px);
+        font-weight: 650;
+        letter-spacing: -0.04em;
+      }
+
+      .intro {
+        max-width: 760px;
+        margin: 14px 0 0;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.7;
+      }
+
+      .control-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        align-items: end;
+        margin-top: 28px;
+        padding: 16px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgb(24 24 37 / 82%);
+        box-shadow: 0 18px 50px var(--shadow);
+        backdrop-filter: blur(12px);
+      }
+
+      .control {
+        display: grid;
+        gap: 7px;
+      }
+
+      .control label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      select,
+      .button {
+        min-height: 38px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--surface-raised);
+        color: var(--text);
+      }
+
+      select {
+        min-width: 150px;
+        padding: 0 34px 0 11px;
+      }
+
+      .speed-control {
+        min-width: min(280px, 100%);
+        flex: 1;
+      }
+
+      .speed-row {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        min-height: 38px;
+      }
+
+      input[type="range"] {
+        width: 100%;
+        accent-color: var(--accent);
+      }
+
+      #speedValue {
+        width: 66px;
+        color: var(--yellow);
+        font-size: 13px;
+        text-align: right;
+      }
+
+      .button {
+        cursor: pointer;
+        padding: 0 14px;
+        transition:
+          border-color 120ms ease,
+          background 120ms ease,
+          color 120ms ease;
+      }
+
+      .button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .button:focus-visible,
+      select:focus-visible,
+      input:focus-visible,
+      .animation-card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+
+      .selection {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: center;
+        margin-top: 18px;
+        padding: 17px 18px;
+        border: 1px solid var(--accent);
+        border-radius: 10px;
+        background:
+          linear-gradient(135deg, var(--accent-soft), transparent 55%),
+          var(--surface);
+      }
+
+      .selection-label {
+        margin-bottom: 8px;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .selection-preview {
+        overflow: hidden;
+        min-height: 24px;
+        color: var(--text);
+        font-size: clamp(14px, 2vw, 17px);
+        font-weight: 600;
+        line-height: 24px;
+        text-overflow: ellipsis;
+        white-space: pre;
+      }
+
+      .selection-name {
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .selection-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .section-heading {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: baseline;
+        margin: 34px 0 14px;
+      }
+
+      .section-heading h2 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .section-heading span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr));
+        gap: 12px;
+      }
+
+      .animation-card {
+        position: relative;
+        overflow: hidden;
+        min-height: 150px;
+        padding: 15px;
+        border: 1px solid var(--border-soft);
+        border-radius: 9px;
+        background: var(--surface);
+        color: inherit;
+        cursor: pointer;
+        text-align: left;
+        transition:
+          border-color 140ms ease,
+          background 140ms ease,
+          transform 140ms ease;
+      }
+
+      .animation-card:hover {
+        border-color: var(--border);
+        background: var(--surface-raised);
+        transform: translateY(-1px);
+      }
+
+      .animation-card.in-pool {
+        border-color: var(--accent);
+        background:
+          linear-gradient(135deg, var(--accent-soft), transparent 62%),
+          var(--surface-selected);
+      }
+
+      .animation-card.in-pool {
+        box-shadow: inset 3px 0 0 var(--accent);
+      }
+
+      .animation-card.previewing {
+        border-color: var(--yellow);
+        box-shadow:
+          inset 3px 0 0 var(--accent),
+          0 0 0 1px rgb(249 226 175 / 24%);
+      }
+
+      .card-heading {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        min-height: 20px;
+      }
+
+      .number {
+        flex: 0 0 auto;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .name {
+        overflow: hidden;
+        flex: 1;
+        font-size: 13px;
+        font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .card-badge {
+        display: none;
+        flex: 0 0 auto;
+        padding: 3px 6px;
+        border: 1px solid var(--accent);
+        border-radius: 999px;
+        color: var(--accent);
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .animation-card.in-pool .pool-badge,
+      .animation-card.previewing .preview-badge {
+        display: inline-block;
+      }
+
+      .animation-card.previewing .preview-badge {
+        border-color: var(--yellow);
+        color: var(--yellow);
+      }
+
+      .animation-card.previewing .pool-badge {
+        display: none;
+      }
+
+      .terminal {
+        display: block;
+        margin-top: 16px;
+        padding: 13px 12px;
+        border: 1px solid var(--border-soft);
+        border-radius: 6px;
+        background: #11111b;
+        box-shadow: inset 0 1px 0 rgb(255 255 255 / 2%);
+      }
+
+      .prompt {
+        display: block;
+        color: var(--faint);
+        font-size: 10px;
+        line-height: 1;
+      }
+
+      .prompt strong {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      .preview {
+        display: block;
+        overflow: hidden;
+        min-height: 22px;
+        margin-top: 8px;
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 22px;
+        text-overflow: clip;
+        white-space: pre;
+      }
+
+      .card-note {
+        display: block;
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .card-note strong {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      .toast {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        z-index: 10;
+        padding: 11px 14px;
+        border: 1px solid var(--accent);
+        border-radius: 7px;
+        background: var(--surface-raised);
+        color: var(--text);
+        box-shadow: 0 16px 40px var(--shadow);
+        font-size: 12px;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(8px);
+        transition:
+          opacity 160ms ease,
+          transform 160ms ease;
+      }
+
+      .toast.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      @media (max-width: 680px) {
+        .page {
+          width: min(100% - 20px, 1180px);
+          padding-top: 24px;
+        }
+
+        .selection {
+          grid-template-columns: 1fr;
+        }
+
+        .selection-actions {
+          justify-content: flex-start;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <p class="eyebrow">rejoin / startup transition</p>
+      <h1>Choose the handoff animation.</h1>
+      <p class="intro">
+        Every option runs with real terminal glyphs. Build a pool of one or more
+        animations, then simulate launches to see how Rejoin can rotate between
+        them without obvious repeats.
+      </p>
+
+      <section class="control-bar" aria-label="Preview controls">
+        <div class="control">
+          <label for="agent">Agent</label>
+          <select id="agent">
+            <option>Codex</option>
+            <option>Claude</option>
+            <option>Cursor</option>
+            <option>Pi</option>
+            <option>OpenCode</option>
+          </select>
+        </div>
+
+        <div class="control speed-control">
+          <label for="speed">Tempo</label>
+          <div class="speed-row">
+            <input
+              id="speed"
+              type="range"
+              min="75"
+              max="150"
+              step="25"
+              value="100"
+            />
+            <output id="speedValue" for="speed">1.00×</output>
+          </div>
+        </div>
+
+        <button class="button" id="pause" type="button">Pause</button>
+        <button class="button" id="recommended" type="button">
+          Recommended 6
+        </button>
+      </section>
+
+      <section class="selection" aria-live="polite">
+        <div>
+          <div class="selection-label">Random launch preview</div>
+          <div class="selection-preview" id="selectedPreview">
+            Build a rotation pool below
+          </div>
+          <div class="selection-name" id="selectedName">
+            0 animations in pool
+          </div>
+        </div>
+        <div class="selection-actions">
+          <button class="button" id="simulate" type="button" disabled>
+            Simulate launch
+          </button>
+          <button class="button" id="autoRotate" type="button" disabled>
+            Auto-rotate
+          </button>
+          <button class="button" id="copy" type="button" disabled>
+            Copy config
+          </button>
+          <button class="button" id="clear" type="button" disabled>
+            Clear pool
+          </button>
+        </div>
+      </section>
+
+      <div class="section-heading">
+        <h2>Animation options</h2>
+        <span>Click to toggle · Shift-click to use only one</span>
+      </div>
+
+      <section
+        class="grid"
+        id="animationGrid"
+        aria-label="Animation choices"
+      ></section>
+    </main>
+
+    <div class="toast" id="toast" role="status"></div>
+
+    <script>
+      const animations = [
+        {
+          name: "Handoff rail",
+          note: "Directional handoff",
+          frames: [
+            "rejoin  ▸─────────  {agent}  starting",
+            "rejoin  ───▸──────  {agent}  starting",
+            "rejoin  ──────▸───  {agent}  starting",
+            "rejoin  ─────────▸  {agent}  started",
+          ],
+        },
+        {
+          name: "Compact spinner",
+          note: "Small and familiar",
+          frames: [
+            "⠋  Opening {agent}",
+            "⠙  Opening {agent}",
+            "⠹  Opening {agent}",
+            "⠸  Opening {agent}",
+            "⠼  Opening {agent}",
+            "⠴  Opening {agent}",
+            "⠦  Opening {agent}",
+            "⠧  Opening {agent}",
+          ],
+        },
+        {
+          name: "Progress sweep",
+          note: "Strong visual progress",
+          frames: [
+            "[■□□□□□□□]  Starting {agent}",
+            "[■■■□□□□□]  Starting {agent}",
+            "[■■■■■□□□]  Starting {agent}",
+            "[■■■■■■■■]  {agent} started",
+          ],
+        },
+        {
+          name: "Rotating line",
+          note: "ASCII-safe classic",
+          frames: [
+            "|  Opening {agent}",
+            "/  Opening {agent}",
+            "—  Opening {agent}",
+            "\\  Opening {agent}",
+          ],
+        },
+        {
+          name: "Bouncing dot",
+          note: "Simple horizontal motion",
+          frames: [
+            "[●····]  Opening {agent}",
+            "[·●···]  Opening {agent}",
+            "[··●··]  Opening {agent}",
+            "[···●·]  Opening {agent}",
+            "[····●]  Opening {agent}",
+            "[···●·]  Opening {agent}",
+            "[··●··]  Opening {agent}",
+            "[·●···]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Growing blocks",
+          note: "Compact progress meter",
+          frames: [
+            "[▰▱▱▱▱]  Starting {agent}",
+            "[▰▰▱▱▱]  Starting {agent}",
+            "[▰▰▰▱▱]  Starting {agent}",
+            "[▰▰▰▰▱]  Starting {agent}",
+            "[▰▰▰▰▰]  {agent} started",
+          ],
+        },
+        {
+          name: "Pulsing indicator",
+          note: "Minimal and polished",
+          frames: [
+            "·  Opening {agent}",
+            "○  Opening {agent}",
+            "◉  Opening {agent}",
+            "●  Opening {agent}",
+            "◉  Opening {agent}",
+            "○  Opening {agent}",
+          ],
+        },
+        {
+          name: "Moving highlight",
+          note: "Balanced continuous loop",
+          frames: [
+            "[■□□□□]  {agent}",
+            "[□■□□□]  {agent}",
+            "[□□■□□]  {agent}",
+            "[□□□■□]  {agent}",
+            "[□□□□■]  {agent}",
+            "[□□□■□]  {agent}",
+            "[□□■□□]  {agent}",
+            "[□■□□□]  {agent}",
+          ],
+        },
+        {
+          name: "Equalizer",
+          note: "Energetic signal motion",
+          frames: [
+            "[▁▂▃▅▇]  Opening {agent}",
+            "[▂▃▅▇▅]  Opening {agent}",
+            "[▃▅▇▅▃]  Opening {agent}",
+            "[▅▇▅▃▂]  Opening {agent}",
+            "[▇▅▃▂▁]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Expanding pulse",
+          note: "Ultra-compact breathing",
+          frames: [
+            "·  Opening {agent}",
+            "∙  Opening {agent}",
+            "●  Opening {agent}",
+            "∙  Opening {agent}",
+          ],
+        },
+        {
+          name: "Ring pulse",
+          note: "Clean four-frame pulse",
+          frames: [
+            "·  Opening {agent}",
+            "○  Opening {agent}",
+            "◉  Opening {agent}",
+            "○  Opening {agent}",
+          ],
+        },
+        {
+          name: "Horizontal breathing",
+          note: "Soft sliding cluster",
+          frames: [
+            "[·    ]  Opening {agent}",
+            "[··   ]  Opening {agent}",
+            "[···  ]  Opening {agent}",
+            "[ ··· ]  Opening {agent}",
+            "[  ···]  Opening {agent}",
+            "[ ··· ]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Bouncing bar",
+          note: "Clear mechanical motion",
+          frames: [
+            "[━────]  Opening {agent}",
+            "[─━───]  Opening {agent}",
+            "[──━──]  Opening {agent}",
+            "[───━─]  Opening {agent}",
+            "[────━]  Opening {agent}",
+            "[───━─]  Opening {agent}",
+            "[──━──]  Opening {agent}",
+            "[─━───]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Double-dot chase",
+          note: "More weight than one dot",
+          frames: [
+            "[●●···]  Opening {agent}",
+            "[·●●··]  Opening {agent}",
+            "[··●●·]  Opening {agent}",
+            "[···●●]  Opening {agent}",
+            "[··●●·]  Opening {agent}",
+            "[·●●··]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Center pulse",
+          note: "Distinctive symmetrical burst",
+          frames: [
+            "[··●··]  Opening {agent}",
+            "[·●●●·]  Opening {agent}",
+            "[●●●●●]  Opening {agent}",
+            "[·●●●·]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Orbit",
+          note: "Smooth back-and-forth loop",
+          frames: [
+            "[●···]  Opening {agent}",
+            "[·●··]  Opening {agent}",
+            "[··●·]  Opening {agent}",
+            "[···●]  Opening {agent}",
+            "[··●·]  Opening {agent}",
+            "[·●··]  Opening {agent}",
+          ],
+        },
+        {
+          name: "Alternating rings",
+          note: "A wider pulsing rhythm",
+          frames: [
+            "○ · ○  Opening {agent}",
+            "· ○ ·  Opening {agent}",
+            "○ ● ○  Opening {agent}",
+            "· ○ ·  Opening {agent}",
+          ],
+        },
+        {
+          id: "tether-pulse",
+          name: "Tether pulse",
+          note: "A live signal crossing an existing connection",
+          category: "Rejoin native",
+          interval: 110,
+          frames: [
+            "══──────  {agent}",
+            "─══─────  {agent}",
+            "──══────  {agent}",
+            "───══───  {agent}",
+            "────══──  {agent}",
+            "─────══─  {agent}",
+            "──────══  {agent}",
+            "═──────═  {agent}",
+          ],
+        },
+        {
+          id: "latch",
+          name: "Latch",
+          note: "Two endpoints meet without claiming completion",
+          category: "Rejoin native",
+          interval: 120,
+          frames: [
+            ">--------<  {agent}",
+            "->------<-  {agent}",
+            "-->----<--  {agent}",
+            "--->--<---  {agent}",
+            "----><----  {agent}",
+            "--->--<---  {agent}",
+            "-->----<--  {agent}",
+            "->------<-  {agent}",
+          ],
+        },
+        {
+          id: "packet-flow",
+          name: "Packet flow",
+          note: "Quiet, continuous traffic on the link",
+          category: "Rejoin native",
+          interval: 130,
+          frames: [
+            "═──═──═──  {agent}",
+            "─═──═──═─  {agent}",
+            "──═──═──═  {agent}",
+          ],
+        },
+        {
+          id: "keepalive-gap",
+          name: "Keepalive gap",
+          note: "A small gap travels through a solid connection",
+          category: "Rejoin native",
+          interval: 120,
+          frames: [
+            "[ ───────]  {agent}",
+            "[─ ──────]  {agent}",
+            "[── ─────]  {agent}",
+            "[─── ────]  {agent}",
+            "[──── ───]  {agent}",
+            "[───── ──]  {agent}",
+            "[────── ─]  {agent}",
+            "[─────── ]  {agent}",
+          ],
+        },
+        {
+          id: "handshake",
+          name: "Handshake",
+          note: "A compact join signal with an ASCII-safe shape",
+          category: "Rejoin native",
+          interval: 150,
+          frames: [
+            ">...<  {agent}",
+            ".>.<.  {agent}",
+            "..+..  {agent}",
+            ".>.<.  {agent}",
+          ],
+        },
+        {
+          id: "plug-seat",
+          name: "Plug seat",
+          note: "Connector and socket calmly seat together",
+          category: "Rejoin native",
+          interval: 160,
+          frames: [
+            "──┤   ├──  {agent}",
+            "───┤ ├───  {agent}",
+            "────┼────  {agent}",
+            "───┤ ├───  {agent}",
+          ],
+        },
+        {
+          id: "carrier",
+          name: "Carrier",
+          note: "The terminal cursor carries focus to the agent",
+          category: "Rejoin native",
+          interval: 100,
+          frames: [
+            "█───────  {agent}",
+            "─█──────  {agent}",
+            "──█─────  {agent}",
+            "───█────  {agent}",
+            "────█───  {agent}",
+            "─────█──  {agent}",
+            "──────█─  {agent}",
+            "───────█  {agent}",
+          ],
+        },
+        {
+          id: "breath-rail",
+          name: "Breath rail",
+          note: "The connection breathes without travelling",
+          category: "Rejoin native",
+          interval: 170,
+          frames: [
+            "────────  {agent}",
+            "───══───  {agent}",
+            "──════──  {agent}",
+            "───══───  {agent}",
+          ],
+        },
+        {
+          id: "waypoint-crossing",
+          name: "Waypoint crossing",
+          note: "A signal crosses the handoff boundary",
+          category: "Rejoin native",
+          interval: 110,
+          frames: [
+            "═──┼────  {agent}",
+            "─═─┼────  {agent}",
+            "──═┼────  {agent}",
+            "───╪────  {agent}",
+            "───┼═───  {agent}",
+            "───┼─═──  {agent}",
+            "───┼──═─  {agent}",
+            "───┼───═  {agent}",
+          ],
+        },
+        {
+          id: "ownership-transfer",
+          name: "Ownership transfer",
+          note: "Focus moves between the two terminal endpoints",
+          category: "Rejoin native",
+          interval: 160,
+          frames: [
+            "●──────○  {agent}",
+            "◐──────◐  {agent}",
+            "○──────●  {agent}",
+            "◐──────◐  {agent}",
+          ],
+        },
+        {
+          id: "relay-baton",
+          name: "Relay baton",
+          note: "A handoff token travels and returns",
+          category: "Rejoin native",
+          interval: 140,
+          frames: [
+            "[o]───[ ]  {agent}",
+            "[ ]o──[ ]  {agent}",
+            "[ ]─o─[ ]  {agent}",
+            "[ ]──o[ ]  {agent}",
+            "[ ]───[o]  {agent}",
+            "[ ]──o[ ]  {agent}",
+            "[ ]─o─[ ]  {agent}",
+            "[ ]o──[ ]  {agent}",
+          ],
+        },
+      ];
+
+      const legacyIds = [
+        "handoff-rail",
+        "compact-spinner",
+        "progress-sweep",
+        "rotating-line",
+        "bouncing-dot",
+        "growing-blocks",
+        "pulsing-indicator",
+        "moving-highlight",
+        "equalizer",
+        "expanding-pulse",
+        "ring-pulse",
+        "horizontal-breathing",
+        "bouncing-bar",
+        "double-dot-chase",
+        "center-pulse",
+        "orbit",
+        "alternating-rings",
+      ];
+
+      animations.forEach((animation, index) => {
+        animation.id ??= legacyIds[index];
+        animation.interval ??= 150;
+        animation.category ??= "Original study";
+      });
+
+      const recommendedIds = new Set([
+        "tether-pulse",
+        "latch",
+        "packet-flow",
+        "handshake",
+        "handoff-rail",
+        "ring-pulse",
+      ]);
+
+      const grid = document.querySelector("#animationGrid");
+      const agentSelect = document.querySelector("#agent");
+      const speedInput = document.querySelector("#speed");
+      const speedValue = document.querySelector("#speedValue");
+      const pauseButton = document.querySelector("#pause");
+      const recommendedButton = document.querySelector("#recommended");
+      const simulateButton = document.querySelector("#simulate");
+      const autoRotateButton = document.querySelector("#autoRotate");
+      const copyButton = document.querySelector("#copy");
+      const clearButton = document.querySelector("#clear");
+      const selectedPreview = document.querySelector("#selectedPreview");
+      const selectedName = document.querySelector("#selectedName");
+      const toast = document.querySelector("#toast");
+
+      const animationsById = new Map(
+        animations.map((animation) => [animation.id, animation]),
+      );
+      let pool = new Set();
+      let previewingId = null;
+      let paused = false;
+      let pausedAt = 0;
+      let globalStartedAt = performance.now();
+      let previewStartedAt = globalStartedAt;
+      let autoRotating = false;
+      let rotationTimer = null;
+      let shuffleBag = [];
+      let lastPick = null;
+      let toastTimer = null;
+
+      const formatFrame = (frame) =>
+        frame.replaceAll("{agent}", agentSelect.value);
+
+      const tempo = () => Number(speedInput.value) / 100;
+
+      const frameFor = (animation, now, startedAt = globalStartedAt) => {
+        const elapsed = Math.max(0, now - startedAt);
+        const interval = animation.interval / tempo();
+        const index = Math.floor(elapsed / interval) % animation.frames.length;
+        return formatFrame(animation.frames[index]);
+      };
+
+      animations.forEach((animation, index) => {
+        const card = document.createElement("button");
+        card.className = "animation-card";
+        card.type = "button";
+        card.dataset.index = String(index);
+        card.dataset.id = animation.id;
+        card.setAttribute("aria-pressed", "false");
+        card.innerHTML = `
+          <span class="card-heading">
+            <span class="number">${String(index + 1).padStart(2, "0")}</span>
+            <span class="name"></span>
+            <span class="card-badge pool-badge">in pool</span>
+            <span class="card-badge preview-badge">previewing</span>
+          </span>
+          <span class="terminal">
+            <span class="prompt"><strong>rejoin</strong> / launch preview</span>
+            <span class="preview"></span>
+          </span>
+          <span class="card-note"></span>
+        `;
+        card.querySelector(".name").textContent = animation.name;
+        card.querySelector(".card-note").innerHTML =
+          `<strong>${animation.category}</strong> · ${animation.note}`;
+        card.addEventListener("click", (event) => {
+          togglePool(animation.id, event.shiftKey);
+        });
+        grid.append(card);
+      });
+
+      const previews = [...document.querySelectorAll(".preview")];
+      const cards = [...document.querySelectorAll(".animation-card")];
+
+      function render() {
+        const now = paused ? pausedAt : performance.now();
+        animations.forEach((animation, index) => {
+          previews[index].textContent = frameFor(animation, now);
+        });
+
+        if (previewingId !== null) {
+          const animation = animationsById.get(previewingId);
+          selectedPreview.textContent = frameFor(
+            animation,
+            now,
+            previewStartedAt,
+          );
+        }
+      }
+
+      function updateInterface() {
+        cards.forEach((card) => {
+          const id = card.dataset.id;
+          const isInPool = pool.has(id);
+          const isPreviewing = previewingId === id;
+          card.classList.toggle("in-pool", isInPool);
+          card.classList.toggle("previewing", isPreviewing);
+          card.setAttribute("aria-pressed", String(isInPool));
+        });
+
+        const hasPool = pool.size > 0;
+        simulateButton.disabled = !hasPool;
+        autoRotateButton.disabled = !hasPool;
+        copyButton.disabled = !hasPool;
+        clearButton.disabled = !hasPool;
+
+        if (!hasPool) {
+          stopAutoRotate();
+          previewingId = null;
+          selectedPreview.textContent = "Build a rotation pool below";
+          selectedName.textContent = "0 animations in pool";
+        } else if (previewingId !== null) {
+          const animation = animationsById.get(previewingId);
+          const index = animations.indexOf(animation);
+          selectedName.textContent =
+            `Previewing option ${index + 1} — ${animation.name} · ` +
+            `${pool.size} in pool`;
+        } else {
+          selectedPreview.textContent = "Pool ready — simulate a launch";
+          selectedName.textContent = `${pool.size} animation${pool.size === 1 ? "" : "s"} in pool`;
+        }
+
+        saveState();
+        render();
+      }
+
+      function togglePool(id, solo = false) {
+        if (solo) {
+          pool = new Set([id]);
+        } else if (pool.has(id)) {
+          pool.delete(id);
+        } else {
+          pool.add(id);
+        }
+
+        if (!pool.has(previewingId)) {
+          previewingId = null;
+        }
+        resetShuffleBag();
+        updateInterface();
+      }
+
+      function resetShuffleBag() {
+        shuffleBag = [];
+      }
+
+      function refillShuffleBag() {
+        shuffleBag = [...pool];
+        for (let index = shuffleBag.length - 1; index > 0; index -= 1) {
+          const swapIndex = Math.floor(Math.random() * (index + 1));
+          [shuffleBag[index], shuffleBag[swapIndex]] = [
+            shuffleBag[swapIndex],
+            shuffleBag[index],
+          ];
+        }
+
+        if (shuffleBag.length > 1 && shuffleBag[0] === lastPick) {
+          [shuffleBag[0], shuffleBag[1]] = [shuffleBag[1], shuffleBag[0]];
+        }
+      }
+
+      function pickFromPool() {
+        if (pool.size === 0) return null;
+        if (shuffleBag.length === 0) refillShuffleBag();
+        const picked = shuffleBag.shift();
+        lastPick = picked;
+        return picked;
+      }
+
+      function simulateLaunch() {
+        const picked = pickFromPool();
+        if (picked === null) return;
+        previewingId = picked;
+        previewStartedAt = performance.now();
+        updateInterface();
+      }
+
+      function stopAutoRotate() {
+        autoRotating = false;
+        window.clearInterval(rotationTimer);
+        rotationTimer = null;
+        autoRotateButton.textContent = "Auto-rotate";
+        autoRotateButton.setAttribute("aria-pressed", "false");
+      }
+
+      function toggleAutoRotate() {
+        if (autoRotating) {
+          stopAutoRotate();
+          return;
+        }
+
+        if (pool.size === 0) return;
+        autoRotating = true;
+        autoRotateButton.textContent = "Stop rotation";
+        autoRotateButton.setAttribute("aria-pressed", "true");
+        simulateLaunch();
+        rotationTimer = window.setInterval(simulateLaunch, 2200);
+      }
+
+      function clearPool() {
+        pool.clear();
+        previewingId = null;
+        lastPick = null;
+        resetShuffleBag();
+        updateInterface();
+      }
+
+      function chooseRecommended() {
+        pool = new Set(recommendedIds);
+        previewingId = null;
+        lastPick = null;
+        resetShuffleBag();
+        updateInterface();
+        showToast("Recommended six added to the pool");
+      }
+
+      function saveState() {
+        localStorage.setItem(
+          "rejoin-animation-pool-v2",
+          JSON.stringify({
+            version: 2,
+            pool: [...pool],
+            tempo: tempo(),
+          }),
+        );
+      }
+
+      function showToast(message) {
+        toast.textContent = message;
+        toast.classList.add("visible");
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => {
+          toast.classList.remove("visible");
+        }, 1800);
+      }
+
+      speedInput.addEventListener("input", () => {
+        speedValue.value = `${tempo().toFixed(2)}×`;
+        saveState();
+      });
+
+      agentSelect.addEventListener("change", render);
+
+      pauseButton.addEventListener("click", () => {
+        const now = performance.now();
+        if (paused) {
+          const pauseDuration = now - pausedAt;
+          globalStartedAt += pauseDuration;
+          previewStartedAt += pauseDuration;
+          paused = false;
+        } else {
+          pausedAt = now;
+          paused = true;
+        }
+        pauseButton.textContent = paused ? "Resume" : "Pause";
+        pauseButton.setAttribute("aria-pressed", String(paused));
+        render();
+      });
+
+      recommendedButton.addEventListener("click", chooseRecommended);
+      simulateButton.addEventListener("click", simulateLaunch);
+      autoRotateButton.addEventListener("click", toggleAutoRotate);
+      clearButton.addEventListener("click", clearPool);
+
+      copyButton.addEventListener("click", async () => {
+        if (pool.size === 0) return;
+        const ids = animations
+          .filter((animation) => pool.has(animation.id))
+          .map((animation) => `"${animation.id}"`);
+        const config =
+          `[startup]\n` +
+          `animations = [${ids.join(", ")}]\n` +
+          `speed = ${tempo().toFixed(2)}`;
+        try {
+          await navigator.clipboard.writeText(config);
+          showToast("TOML configuration copied");
+        } catch {
+          const textarea = document.createElement("textarea");
+          textarea.value = config;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.append(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          textarea.remove();
+          showToast("TOML configuration copied");
+        }
+      });
+
+      const storedPool = localStorage.getItem("rejoin-animation-pool-v2");
+      if (storedPool !== null) {
+        try {
+          const parsed = JSON.parse(storedPool);
+          if (parsed.version === 2 && Array.isArray(parsed.pool)) {
+            pool = new Set(parsed.pool.filter((id) => animationsById.has(id)));
+          }
+          if (
+            typeof parsed.tempo === "number" &&
+            [0.75, 1, 1.25, 1.5].includes(parsed.tempo)
+          ) {
+            speedInput.value = String(parsed.tempo * 100);
+          }
+        } catch {
+          localStorage.removeItem("rejoin-animation-pool-v2");
+        }
+      } else {
+        const storedChoice = localStorage.getItem("rejoin-animation-choice");
+        const savedChoice = Number(storedChoice);
+        if (
+          storedChoice !== null &&
+          Number.isInteger(savedChoice) &&
+          savedChoice >= 0 &&
+          savedChoice < animations.length
+        ) {
+          pool.add(animations[savedChoice].id);
+        }
+        localStorage.removeItem("rejoin-animation-choice");
+      }
+
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        paused = true;
+        pausedAt = performance.now();
+        pauseButton.textContent = "Resume";
+        pauseButton.setAttribute("aria-pressed", "true");
+      }
+
+      speedValue.value = `${tempo().toFixed(2)}×`;
+      updateInterface();
+      render();
+      window.setInterval(render, 50);
+    </script>
+  </body>
+</html>

@@ -10,6 +10,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::Agent;
 
+const STARTUP_FRAMES: [&str; 4] = ["·", "∙", "●", "∙"];
+const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(160);
+const STARTUP_ANIMATION_LIMIT: Duration = Duration::from_millis(1_200);
+
 #[derive(Clone, Debug)]
 pub enum LaunchKind {
     Resume { agent: Agent, session_id: String },
@@ -63,17 +67,16 @@ impl StartupIndicator {
     fn start(agent: Agent) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);
-        let frames = [".  ", ".. ", "..."];
-        draw_opening(agent, frames[0], false);
+        draw_opening(agent, STARTUP_FRAMES[0], false);
         let initial_cursor = console_cursor();
         let worker = std::thread::spawn(move || {
             let mut frame = 0;
             let mut expected_cursor = initial_cursor;
-            let mut fallback_ticks = 0_u8;
+            let deadline = Instant::now() + STARTUP_ANIMATION_LIMIT;
 
-            while worker_running.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(90));
-                if !worker_running.load(Ordering::Acquire) {
+            while worker_running.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::thread::sleep(STARTUP_FRAME_INTERVAL);
+                if !worker_running.load(Ordering::Acquire) || Instant::now() >= deadline {
                     break;
                 }
 
@@ -85,17 +88,8 @@ impl StartupIndicator {
                     break;
                 }
 
-                // If cursor inspection is unavailable, keep the animation
-                // bounded so it cannot interfere with an interactive agent.
-                if expected_cursor.is_none() {
-                    fallback_ticks = fallback_ticks.saturating_add(1);
-                    if fallback_ticks >= 12 {
-                        break;
-                    }
-                }
-
-                frame = (frame + 1) % frames.len();
-                draw_opening(agent, frames[frame], true);
+                frame = (frame + 1) % STARTUP_FRAMES.len();
+                draw_opening(agent, STARTUP_FRAMES[frame], true);
                 expected_cursor = console_cursor();
             }
         });
@@ -122,16 +116,16 @@ impl Drop for StartupIndicator {
     }
 }
 
-fn draw_opening(agent: Agent, dots: &str, update: bool) {
+fn draw_opening(agent: Agent, pulse: &str, update: bool) {
     let mut output = io::stdout().lock();
     if update {
         let _ = write!(
             output,
-            "\x1b[1A\r\x1b[2Krejoin: opening {} {dots}\x1b[1B\r",
+            "\x1b[1A\r\x1b[2K{pulse} opening {}\x1b[1B\r",
             agent.label()
         );
     } else {
-        let _ = writeln!(output, "rejoin: opening {} {dots}", agent.label());
+        let _ = writeln!(output, "{pulse} opening {}", agent.label());
     }
     let _ = output.flush();
 }
@@ -207,6 +201,7 @@ fn build_command(request: &LaunchRequest) -> (Agent, Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn resume_arguments_match_each_agent_cli() {
@@ -232,6 +227,17 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "wrong resume arguments for {agent}");
         }
+    }
+
+    #[test]
+    fn expanding_pulse_frames_are_fixed_width() {
+        assert_eq!(STARTUP_FRAMES, ["·", "∙", "●", "∙"]);
+        assert!(
+            STARTUP_FRAMES
+                .iter()
+                .all(|frame| frame.chars().count() == 1 && UnicodeWidthStr::width(*frame) == 1),
+            "every pulse frame must occupy one character cell"
+        );
     }
 
     #[test]
