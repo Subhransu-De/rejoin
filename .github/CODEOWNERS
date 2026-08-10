@@ -1,0 +1,7 @@
+# Keep automation and distribution changes under explicit maintainer review.
+/.github/workflows/ @Subhransu-De
+/Cargo.toml @Subhransu-De
+/Cargo.lock @Subhransu-De
+/deny.toml @Subhransu-De
+/packaging/ @Subhransu-De
+/wix/ @Subhransu-De

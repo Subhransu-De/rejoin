@@ -2,13 +2,21 @@
 name = "rejoin"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
 description = "A unified terminal session manager for Claude, Codex, Cursor, Pi, and OpenCode"
 authors = ["rejoin contributors"]
 license = "MIT"
 repository = "https://github.com/Subhransu-De/rejoin"
 homepage = "https://github.com/Subhransu-De/rejoin"
 readme = "README.md"
+publish = false
 exclude = ["assets/"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
 
 [package.metadata.wix]
 upgrade-guid = "2B1AEDF4-854B-4029-88C2-F184B63A4D9F"

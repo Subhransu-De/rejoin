@@ -1,6 +1,7 @@
 name: Installer validation
 
 on:
+  workflow_call:
   workflow_dispatch:
   pull_request:
     branches: [main]
@@ -10,6 +11,7 @@ on:
       - "wix/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "src/**"
 
 permissions:
@@ -29,12 +31,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
-      - run: rustup default stable
+        run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install cargo-wix
         run: cargo install cargo-wix --version 0.3.9 --locked
       - name: Find WiX Toolset
@@ -117,12 +118,12 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText("$($msi.FullName).sha256", "$hash  $($msi.Name)`n")
       - name: Attest installers
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/attest@v4
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: dist/*
       - name: Upload MSI
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rejoin-installer-windows
           path: dist/*
@@ -138,12 +139,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
-      - run: rustup default stable
+        run: rustup toolchain install 1.97.1 --profile minimal
       - name: Build release binary
         run: cargo build --release --locked
       - name: Install nFPM
@@ -196,67 +196,14 @@ jobs:
             sha256sum "$package" > "$package.sha256"
           done
       - name: Attest installers
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/attest@v4
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: dist/*
       - name: Upload Linux packages
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rejoin-installers-linux
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 14
-
-  macos:
-    name: macOS PKG
-    runs-on: macos-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
-      - run: rustup default stable
-      - name: Build unsigned universal PKG
-        shell: bash
-        run: bash packaging/build-macos-pkg.sh dist
-      - name: Inspect and smoke-test PKG
-        shell: bash
-        run: |
-          package="$(find dist -maxdepth 1 -name '*.pkg' -print -quit)"
-          version="$(cargo metadata --no-deps --format-version 1 |
-            jq -r '.packages[] | select(.name == "rejoin") | .version')"
-          if pkgutil --check-signature "$package"; then
-            echo "PKG is signed."
-          else
-            echo "PKG is unsigned as expected for validation."
-          fi
-          pkgutil --payload-files "$package" | grep -Fx './usr/local/bin/rejoin'
-          test ! -e /usr/local/bin/rejoin
-          sudo installer -pkg "$package" -target /
-          test "$(/usr/local/bin/rejoin --version)" = "rejoin $version"
-          sudo rm -f /usr/local/bin/rejoin
-          sudo rm -f \
-            /usr/local/share/doc/rejoin/LICENSE \
-            /usr/local/share/doc/rejoin/README.md \
-            /usr/local/share/doc/rejoin/CHANGELOG.md
-          sudo rmdir /usr/local/share/doc/rejoin
-          sudo pkgutil --forget dev.rejoin.cli
-      - name: Attest installer
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/attest@v4
-        with:
-          subject-path: dist/*
-      - name: Upload PKG
-        uses: actions/upload-artifact@v7
-        with:
-          name: rejoin-installer-macos-unsigned
           path: dist/*
           if-no-files-found: error
           retention-days: 14

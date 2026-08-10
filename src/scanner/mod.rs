@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Duration;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
@@ -120,16 +120,37 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
         });
         (
             [
-                ("Claude", claude.join().expect("Claude scanner panicked")),
-                ("Codex", codex.join().expect("Codex scanner panicked")),
-                ("Cursor", cursor.join().expect("Cursor scanner panicked")),
-                ("Pi", pi.join().expect("Pi scanner panicked")),
+                (
+                    "Claude",
+                    claude
+                        .join()
+                        .unwrap_or_else(|_| Err(anyhow!("scanner thread panicked"))),
+                ),
+                (
+                    "Codex",
+                    codex
+                        .join()
+                        .unwrap_or_else(|_| Err(anyhow!("scanner thread panicked"))),
+                ),
+                (
+                    "Cursor",
+                    cursor
+                        .join()
+                        .unwrap_or_else(|_| Err(anyhow!("scanner thread panicked"))),
+                ),
+                (
+                    "Pi",
+                    pi.join()
+                        .unwrap_or_else(|_| Err(anyhow!("scanner thread panicked"))),
+                ),
                 (
                     "OpenCode",
-                    opencode.join().expect("OpenCode scanner panicked"),
+                    opencode
+                        .join()
+                        .unwrap_or_else(|_| Err(anyhow!("scanner thread panicked"))),
                 ),
             ],
-            processes.join().expect("process scanner panicked"),
+            processes.join(),
         )
     });
     for (agent, scan) in scans {
@@ -138,6 +159,15 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
             Err(error) => result.warnings.push(format!("{agent}: {error:#}")),
         }
     }
+    let process_snapshot = match process_snapshot {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            result
+                .warnings
+                .push("Process status: scanner thread panicked".to_owned());
+            ProcessSnapshot::default()
+        }
+    };
 
     let cache_started = Instant::now();
     if let Err(error) = cache.save_if_dirty(&result.sessions) {
