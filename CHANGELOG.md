@@ -2,6 +2,28 @@
 
 All notable changes to rejoin are documented here.
 
+## Unreleased
+
+### Reliability
+
+- Added failure-safe terminal restoration that attempts raw-mode, alternate-screen, and cursor cleanup on errors and unwinding.
+- Converted scanner thread panics into per-scanner warnings so other session sources can still load.
+- Added black-box CLI tests for path overrides, stable JSON output, corrupt OpenCode data, and non-interactive terminal handling.
+
+### Development and security
+
+- Pinned the supported Rust toolchain, added targeted unsafe-code linting, and documented every Windows FFI safety invariant.
+- Added Cargo advisory, license, duplicate, and source policy checks with scheduled CI coverage.
+- Pinned GitHub Actions to immutable commits, checksum-verified the Hawk installer, added job timeouts, and added a latest-stable compatibility check.
+- Added contributor guidance, a security policy, and code ownership for automation and distribution files.
+
+### Distribution
+
+- Connected smoke-tested MSI, DEB, and RPM packages to tagged GitHub Releases alongside portable ZIP and tar archives.
+- Added checksums and GitHub build-provenance attestations to every published artifact.
+- Removed macOS binary packaging while retaining macOS source compatibility testing.
+- Disabled crates.io publication; GitHub Releases remain the only binary distribution channel.
+
 ## [0.1.0] - 2026-08-05
 
 ### Features

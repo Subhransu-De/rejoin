@@ -136,14 +136,20 @@ fn console_cursor() -> Option<(i16, i16)> {
         CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
     };
 
+    // SAFETY: GetStdHandle does not dereference application-provided pointers and
+    // accepts the documented STD_OUTPUT_HANDLE selector.
     let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     if handle.is_null() {
         return None;
     }
     let mut info = std::mem::MaybeUninit::<CONSOLE_SCREEN_BUFFER_INFO>::uninit();
+    // SAFETY: `handle` was returned by GetStdHandle and `info` points to valid,
+    // writable storage for one CONSOLE_SCREEN_BUFFER_INFO value.
     if unsafe { GetConsoleScreenBufferInfo(handle, info.as_mut_ptr()) } == 0 {
         return None;
     }
+    // SAFETY: a nonzero return from GetConsoleScreenBufferInfo guarantees that
+    // the structure referenced by `info` was initialized.
     let cursor = unsafe { info.assume_init() }.dwCursorPosition;
     Some((cursor.X, cursor.Y))
 }

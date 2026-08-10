@@ -142,12 +142,14 @@ fn run_tui(options: ScanOptions) -> Result<()> {
     }
 
     install_panic_hook();
-    let mut terminal = enter_terminal()?;
+    let mut terminal = TerminalSession::enter()?;
     let mut app = App::load(options);
 
     let result = (|| -> Result<()> {
         loop {
-            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            terminal
+                .terminal_mut()?
+                .draw(|frame| ui::draw(frame, &mut app))?;
             app.tick();
             if !event::poll(Duration::from_millis(250))? {
                 continue;
@@ -159,7 +161,7 @@ fn run_tui(options: ScanOptions) -> Result<()> {
                 AppAction::None => {}
                 AppAction::Quit => break,
                 AppAction::Launch(request) => {
-                    prepare_terminal_for_agent(&mut terminal)?;
+                    terminal.prepare_for_agent()?;
                     let status = launch::execute(&request)?;
                     if !status.success() {
                         bail!("agent exited with status {status}");
@@ -171,35 +173,107 @@ fn run_tui(options: ScanOptions) -> Result<()> {
         Ok(())
     })();
 
-    leave_terminal(&mut terminal)?;
-    result
+    finish_with_cleanup(result, terminal.restore())
 }
 
-fn prepare_terminal_for_agent(terminal: &mut Tui) -> Result<()> {
-    // Keep rejoin's alternate screen active while the child owns the terminal.
-    // Inline TUIs can then render freely without polluting the shell's primary
-    // buffer; leave_terminal restores that buffer after the agent exits.
-    disable_raw_mode().context("could not disable terminal raw mode")?;
-    terminal.clear()?;
-    terminal.show_cursor()?;
-    Ok(())
+struct TerminalSession {
+    terminal: Option<Tui>,
+    raw_mode_enabled: bool,
+    alternate_screen_entered: bool,
 }
 
-fn enter_terminal() -> Result<Tui> {
-    enable_raw_mode().context("could not enable terminal raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("could not enter alternate screen")?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    terminal.clear()?;
-    Ok(terminal)
+impl TerminalSession {
+    fn enter() -> Result<Self> {
+        let mut session = Self {
+            terminal: None,
+            raw_mode_enabled: false,
+            alternate_screen_entered: false,
+        };
+
+        // Treat a failed setup call as possibly having changed terminal state so
+        // Drop still attempts the inverse operation.
+        session.raw_mode_enabled = true;
+        enable_raw_mode().context("could not enable terminal raw mode")?;
+
+        let mut stdout = io::stdout();
+        session.alternate_screen_entered = true;
+        execute!(stdout, EnterAlternateScreen).context("could not enter alternate screen")?;
+        session.terminal = Some(
+            Terminal::new(CrosstermBackend::new(stdout))
+                .context("could not initialize terminal renderer")?,
+        );
+        session
+            .terminal_mut()?
+            .clear()
+            .context("could not clear terminal")?;
+        Ok(session)
+    }
+
+    fn terminal_mut(&mut self) -> Result<&mut Tui> {
+        self.terminal
+            .as_mut()
+            .context("terminal renderer is not initialized")
+    }
+
+    fn prepare_for_agent(&mut self) -> Result<()> {
+        // Keep rejoin's alternate screen active while the child owns the terminal.
+        // Inline TUIs can then render freely without polluting the shell's primary
+        // buffer; restore returns to that buffer after the agent exits.
+        if self.raw_mode_enabled {
+            disable_raw_mode().context("could not disable terminal raw mode")?;
+            self.raw_mode_enabled = false;
+        }
+        let terminal = self.terminal_mut()?;
+        terminal.clear()?;
+        terminal.show_cursor()?;
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+
+        if self.raw_mode_enabled {
+            match disable_raw_mode() {
+                Ok(()) => self.raw_mode_enabled = false,
+                Err(error) => failures.push(format!("disable raw mode: {error}")),
+            }
+        }
+        if self.alternate_screen_entered {
+            match execute!(io::stdout(), LeaveAlternateScreen) {
+                Ok(()) => self.alternate_screen_entered = false,
+                Err(error) => failures.push(format!("leave alternate screen: {error}")),
+            }
+        }
+        if let Some(terminal) = self.terminal.as_mut()
+            && let Err(error) = terminal.show_cursor()
+        {
+            failures.push(format!("show cursor: {error}"));
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!("could not fully restore terminal: {}", failures.join("; "))
+        }
+    }
 }
 
-fn leave_terminal(terminal: &mut Tui) -> Result<()> {
-    disable_raw_mode().context("could not disable terminal raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("could not leave alternate screen")?;
-    terminal.show_cursor()?;
-    Ok(())
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn finish_with_cleanup(result: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (result, cleanup) {
+        (Err(error), Err(cleanup_error)) => {
+            eprintln!("warning: terminal cleanup also failed: {cleanup_error:#}");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn install_panic_hook() {
