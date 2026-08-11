@@ -24,3 +24,7 @@ updates:
     assignees:
       - Subhransu-De
     open-pull-requests-limit: 999
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action"
