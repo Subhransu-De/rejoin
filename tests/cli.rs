@@ -49,7 +49,10 @@ fn help_and_version_are_available() {
 
     let version = rejoin().arg("--version").output().unwrap();
     assert_success(&version);
-    assert_eq!(String::from_utf8(version.stdout).unwrap(), "rejoin 0.1.0\n");
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap(),
+        format!("rejoin {}\n", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

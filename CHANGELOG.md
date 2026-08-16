@@ -4,6 +4,8 @@ All notable changes to rejoin are documented here.
 
 ## Unreleased
 
+## [0.2.0] - 2026-08-16
+
 ### Features
 
 - Added a `[n - New]` action to start a fresh session in the focused agent panel.
@@ -28,7 +30,8 @@ All notable changes to rejoin are documented here.
 ### Distribution
 
 - Connected smoke-tested MSI, DEB, and RPM packages to tagged GitHub Releases alongside portable ZIP and tar archives.
-- Added checksums and GitHub build-provenance attestations to every published artifact.
+- Added a standalone portable Windows executable alongside the MSI and ZIP packages.
+- Consolidated release checksums into a GPG-signed manifest while retaining GitHub build-provenance attestations.
 - Removed macOS binary packaging while retaining macOS source compatibility testing.
 - Disabled crates.io publication; GitHub Releases remain the only binary distribution channel.
 
@@ -66,4 +69,5 @@ All notable changes to rejoin are documented here.
 - Added automated tagged releases with native archives and SHA-256 checksums.
 - Added a sanitized product demo and a public handoff roadmap.
 
+[0.2.0]: https://github.com/Subhransu-De/rejoin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Subhransu-De/rejoin/releases/tag/v0.1.0

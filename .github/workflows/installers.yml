@@ -71,7 +71,7 @@ jobs:
           cargo wix --no-build --nocapture `
             --bin-path $env:REJOIN_WIX_BIN `
             --target-bin-dir (Join-Path $PWD 'target/release') `
-            --output "dist/rejoin-$version-windows-x64.msi"
+            --output "dist/rejoin-v$version-windows-x64.msi"
       - name: Smoke-test MSI install and uninstall
         shell: pwsh
         run: |
@@ -111,12 +111,6 @@ jobs:
           if ($machinePath -like '*\rejoin\bin*') {
             throw 'The MSI left its PATH entry behind after uninstall.'
           }
-      - name: Write checksum
-        shell: pwsh
-        run: |
-          $msi = Get-ChildItem dist -Filter '*.msi'
-          $hash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
-          [IO.File]::WriteAllText("$($msi.FullName).sha256", "$hash  $($msi.Name)`n")
       - name: Attest installers
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
@@ -188,13 +182,6 @@ jobs:
               dnf remove -y rejoin
               ! command -v rejoin
             '
-      - name: Write checksums
-        shell: bash
-        run: |
-          cd dist
-          for package in *.deb *.rpm; do
-            sha256sum "$package" > "$package.sha256"
-          done
       - name: Attest installers
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4

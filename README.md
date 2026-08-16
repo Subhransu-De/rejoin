@@ -19,16 +19,16 @@ rejoin is distributed through [GitHub Releases](https://github.com/Subhransu-De/
 
 ### Windows
 
-Download the latest `rejoin-<version>-windows-x64.msi`, open it, and follow the installer. The installer adds `rejoin` to the machine `PATH`.
+Download the latest `rejoin-v<version>-windows-x64.msi`, open it, and follow the installer. The installer adds `rejoin` to the machine `PATH`.
 
-For a portable installation, download the `rejoin-v<version>-x86_64-pc-windows-msvc.zip`, extract it, and place `rejoin.exe` in a directory on `PATH`.
+For a direct portable download, use `rejoin-v<version>-windows-x64.exe`. The `rejoin-v<version>-windows-x64.zip` package also includes the executable, license, README, and changelog.
 
 ### Linux
 
 Download the package for your distribution and install it:
 
 ```sh
-version="0.1.0" # Replace with the release you downloaded.
+version="0.2.0" # Replace with the release you downloaded.
 
 # Debian or Ubuntu
 sudo apt install "./rejoin_${version}_amd64.deb"
@@ -40,8 +40,8 @@ sudo dnf install "./rejoin-${version}-1.x86_64.rpm"
 For other x86-64 Linux distributions, download the `.tar.gz` archive and install the binary:
 
 ```sh
-version="0.1.0" # Replace with the release you downloaded.
-tar -xzf "rejoin-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+version="0.2.0" # Replace with the release you downloaded.
+tar -xzf "rejoin-v${version}-linux-x64.tar.gz"
 sudo install -m 0755 rejoin /usr/local/bin/rejoin
 ```
 
@@ -51,7 +51,18 @@ Confirm the installation:
 rejoin --version
 ```
 
-Each release includes SHA-256 checksum files. If you use the GitHub CLI, you can also verify build provenance:
+Each release includes a GPG-signed `SHA256SUMS` manifest and the public release key. Verify the manifest and downloaded files:
+
+```sh
+gpg --show-keys --with-fingerprint rejoin-release-key.asc
+gpg --import rejoin-release-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS
+```
+
+The expected primary GPG fingerprint is `039E ED8E 5BFC C203 92DB DFD9 7D0D 1D64 441E CACF`. Check the downloaded public key against this fingerprint before trusting it.
+
+The downloadable executables and installers are not Authenticode-signed. If you use the GitHub CLI, you can also verify build provenance:
 
 ```sh
 gh attestation verify "path/to/downloaded-file" --repo Subhransu-De/rejoin

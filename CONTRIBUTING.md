@@ -63,12 +63,20 @@ Action references must use full commit SHAs with the release version in a traili
 
 ## Releases
 
-Releases are published from version tags through GitHub Actions. The tag must match the version in `Cargo.toml`.
+Releases are staged from version tags through GitHub Actions. The tag must match the version in `Cargo.toml` and must be GPG-signed and verified by GitHub.
 
-The release workflow builds, tests, checksums, attests, and publishes:
+The release workflow builds, tests, checksums, attests, and creates a draft containing:
 
-- A Windows MSI and portable ZIP
+- A Windows MSI, standalone executable, and portable ZIP
 - Linux DEB and RPM packages
 - A Linux tarball fallback
+
+Finish the draft from a trusted local checkout so the private GPG key never enters GitHub Actions:
+
+```powershell
+.\scripts\finalize-release.ps1 -Tag v0.2.0
+```
+
+The script verifies the signed tag, the exact expected asset set, and every staged checksum. It then signs `SHA256SUMS`, exports only public key `039E ED8E 5BFC C203 92DB DFD9 7D0D 1D64 441E CACF`, uploads both files, and publishes the release. Executables and installers are not Authenticode-signed.
 
 Do not publish rejoin to crates.io or add a WinGet manifest unless the distribution policy is intentionally changed first.
