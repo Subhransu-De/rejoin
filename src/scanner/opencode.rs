@@ -13,7 +13,7 @@ pub fn scan(database: &Path) -> Result<Vec<Session>> {
     let connection = open(database)?;
     let mut statement = connection.prepare(
         "SELECT s.id, s.directory, s.title, s.time_updated, s.time_archived \
-         FROM session s ORDER BY s.time_updated DESC",
+         FROM session s WHERE s.parent_id IS NULL ORDER BY s.time_updated DESC",
     )?;
     let rows = statement.query_map([], |row| {
         let cwd = PathBuf::from(row.get::<_, String>(1)?);
@@ -90,4 +90,36 @@ fn open(database: &Path) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("could not open {}", database.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_only_root_opencode_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("opencode.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT,
+                    directory TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    time_archived INTEGER
+                );
+                INSERT INTO session VALUES
+                    ('root', NULL, '/tmp/demo', 'Root session', 2, NULL),
+                    ('child', 'root', '/tmp/demo', 'Child session', 3, NULL);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let sessions = scan(&database).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "root");
+    }
 }

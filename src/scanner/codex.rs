@@ -28,29 +28,40 @@ pub fn scan(home: &Path, cache: &SessionCache) -> Result<Vec<Session>> {
         let files = jsonl_files(&root)?;
         profile("codex files", enumerate_started);
         let parse_started = Instant::now();
-        let mut found = parallel_map(files, |path| {
+        let found = parallel_map(files, |path| {
             let mut session = match cache.get(&path) {
-                Some(session) => session,
+                Some(session) => Some(session),
                 None => match parse_session(&path, &titles, archived) {
                     Ok(session) => session,
-                    Err(error) => error_session(path, error, archived),
+                    Err(error) => Some(error_session(path, error, archived)),
                 },
-            };
+            }?;
             if let Some(title) = titles.get(&session.id) {
                 session.title.clone_from(title);
             }
             session.archived = archived;
-            session
+            Some(session)
         });
         profile("codex parse", parse_started);
-        sessions.append(&mut found);
+        sessions.extend(found.into_iter().flatten());
     }
     Ok(sessions)
 }
 
-fn parse_session(path: &Path, titles: &HashMap<String, String>, archived: bool) -> Result<Session> {
+fn parse_session(
+    path: &Path,
+    titles: &HashMap<String, String>,
+    archived: bool,
+) -> Result<Option<Session>> {
     let header: CodexHeader = first_json(path)?;
     let meta = header.payload.as_deref().unwrap_or(&header);
+    if meta
+        .source
+        .as_ref()
+        .is_some_and(|source| source.get("subagent").is_some())
+    {
+        return Ok(None);
+    }
     let id = meta
         .id
         .as_deref()
@@ -86,7 +97,7 @@ fn parse_session(path: &Path, titles: &HashMap<String, String>, archived: bool) 
             .unwrap_or_default()
     });
 
-    Ok(Session {
+    Ok(Some(Session {
         id,
         agent: Agent::Codex,
         project,
@@ -101,7 +112,7 @@ fn parse_session(path: &Path, titles: &HashMap<String, String>, archived: bool) 
         archived,
         parse_error: None,
         preview_loaded: false,
-    })
+    }))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -114,6 +125,8 @@ struct CodexHeader {
     session_id: Option<String>,
     #[serde(default)]
     cwd: Option<PathBuf>,
+    #[serde(default)]
+    source: Option<Value>,
     #[serde(default)]
     git: Option<CodexGit>,
 }
@@ -284,9 +297,39 @@ mod tests {
         )
         .unwrap();
 
-        let session = parse_session(&path, &HashMap::new(), false).unwrap();
+        let session = parse_session(&path, &HashMap::new(), false)
+            .unwrap()
+            .unwrap();
         assert_eq!(session.id, "abc");
         assert_eq!(session.title, "Fix the scanner");
         assert_eq!(load_preview(&path).unwrap(), "The scanner is fixed.");
+    }
+
+    #[test]
+    fn excludes_codex_subagent_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, source) in [
+            ("review", r#"{"subagent":"review"}"#),
+            (
+                "thread-spawn",
+                r#"{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}"#,
+            ),
+        ] {
+            let path = directory.path().join(format!("rollout-{name}.jsonl"));
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"type":"session_meta","payload":{{"id":"{name}","cwd":"/tmp/demo","source":{source}}}}}"#
+                ) + "\n",
+            )
+            .unwrap();
+
+            assert!(
+                parse_session(&path, &HashMap::new(), false)
+                    .unwrap()
+                    .is_none(),
+                "{name} subagent should not be listed"
+            );
+        }
     }
 }

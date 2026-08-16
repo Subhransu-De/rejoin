@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Agent, Session, SessionStatus};
 
-const CACHE_VERSION: u8 = 1;
+const CACHE_VERSION: u8 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheEntry {
