@@ -16,6 +16,7 @@ const STARTUP_ANIMATION_LIMIT: Duration = Duration::from_millis(1_200);
 
 #[derive(Clone, Debug)]
 pub enum LaunchKind {
+    New { agent: Agent },
     Resume { agent: Agent, session_id: String },
     Handoff { target: Agent, markdown: String },
 }
@@ -161,6 +162,7 @@ fn console_cursor() -> Option<(i16, i16)> {
 
 fn build_command(request: &LaunchRequest) -> (Agent, Command) {
     match &request.kind {
+        LaunchKind::New { agent } => (*agent, Command::new(agent.binary())),
         LaunchKind::Resume { agent, session_id } => {
             let mut command = Command::new(agent.binary());
             match agent {
@@ -233,6 +235,24 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "wrong resume arguments for {agent}");
         }
+    }
+
+    #[test]
+    fn new_session_starts_the_selected_agent_without_resume_arguments() {
+        for agent in Agent::ALL {
+            let request = LaunchRequest {
+                kind: LaunchKind::New { agent },
+                cwd: PathBuf::from("."),
+            };
+            let (actual_agent, command) = build_command(&request);
+
+            assert_eq!(actual_agent, agent);
+            assert_eq!(command.get_program(), agent.binary());
+            assert_eq!(command.get_args().count(), 0);
+        }
+
+        #[cfg(windows)]
+        assert_eq!(Agent::Cursor.binary(), "cursor-agent.cmd");
     }
 
     #[test]

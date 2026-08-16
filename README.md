@@ -87,6 +87,7 @@ Use `rejoin --all` to search every discovered session, `rejoin list` for a plain
 | -------------- | ----------------------------------- |
 | `Ctrl` + arrow | Move between agent panels           |
 | `Up` / `Down`  | Select a session                    |
+| `n`            | Start a new session in the panel    |
 | `Enter`        | Resume the selected session         |
 | `x`            | Launch another agent with a handoff |
 | `h`            | Preview the handoff                 |

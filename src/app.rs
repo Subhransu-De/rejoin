@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -221,6 +222,7 @@ impl App {
                 AppAction::None
             }
             KeyCode::Enter => self.resume_selected(),
+            KeyCode::Char('n') => self.start_new_session(),
             KeyCode::Char('/') => {
                 self.mode = Mode::Search;
                 AppAction::None
@@ -392,6 +394,26 @@ impl App {
                 session_id: session.id.clone(),
             },
             cwd: session.cwd.clone(),
+        })
+    }
+
+    pub fn show_launch_error(&mut self, error: &anyhow::Error) {
+        self.toast = Some(Toast::new(
+            format!("Could not start agent: {error:#}"),
+            true,
+        ));
+    }
+
+    fn start_new_session(&self) -> AppAction {
+        AppAction::Launch(LaunchRequest {
+            kind: LaunchKind::New {
+                agent: self.active_agent,
+            },
+            cwd: self
+                .scan_options
+                .scope
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".")),
         })
     }
 

@@ -162,7 +162,14 @@ fn run_tui(options: ScanOptions) -> Result<()> {
                 AppAction::Quit => break,
                 AppAction::Launch(request) => {
                     terminal.prepare_for_agent()?;
-                    let status = launch::execute(&request)?;
+                    let status = match launch::execute(&request) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            terminal.reenter_tui()?;
+                            app.show_launch_error(&error);
+                            continue;
+                        }
+                    };
                     if !status.success() {
                         bail!("agent exited with status {status}");
                     }
@@ -226,6 +233,20 @@ impl TerminalSession {
         let terminal = self.terminal_mut()?;
         terminal.clear()?;
         terminal.show_cursor()?;
+        Ok(())
+    }
+
+    fn reenter_tui(&mut self) -> Result<()> {
+        if !self.alternate_screen_entered {
+            execute!(io::stdout(), EnterAlternateScreen)
+                .context("could not return to rejoin after agent launch failed")?;
+            self.alternate_screen_entered = true;
+        }
+        if !self.raw_mode_enabled {
+            enable_raw_mode().context("could not restore rejoin input mode")?;
+            self.raw_mode_enabled = true;
+        }
+        self.terminal_mut()?.clear()?;
         Ok(())
     }
 
