@@ -103,12 +103,23 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
     } else {
         Style::default().fg(MUTED)
     };
-    let title = format!(
-        " {}{} ({}) ",
-        if focused { "● " } else { "" },
-        agent.label(),
-        indices.len()
-    );
+    let title = Line::from(vec![
+        Span::raw(format!(
+            " {}{} ({})  ",
+            if focused { "● " } else { "" },
+            agent.label(),
+            indices.len()
+        )),
+        Span::styled(
+            "[n - New]",
+            if focused {
+                agent_style(agent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            },
+        ),
+        Span::raw(" "),
+    ]);
     if indices.is_empty() {
         let message = if app.agent_session_count(agent) == 0 {
             "No sessions in this folder."
@@ -121,7 +132,7 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(border_style)
-                        .title(title),
+                        .title(title.clone()),
                 )
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true }),
@@ -191,9 +202,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(folder_width)])
         .split(area);
     let content = match app.mode {
-        Mode::Normal if columns[0].width < 100 => " ↑↓   Ctrl+←→   ↵ resume   h handoff ",
+        Mode::Normal if columns[0].width < 100 => " n new   ↑↓   Ctrl+←→   ↵ resume ",
         Mode::Normal => {
-            " ↑/↓ session   Ctrl+arrows panel   ↵ resume   h handoff   x launch   / search   f filter   ? help   q quit "
+            " n new   ↑/↓ session   Ctrl+arrows panel   ↵ resume   h handoff   x launch   / search   f filter   ? help   q quit "
         }
         Mode::Search => " type to search   ↵ keep   Esc clear ",
         Mode::Filter => " ↑↓ field   ←→ choose   type values   ↵ apply   Esc cancel ",
@@ -318,8 +329,9 @@ Navigation\n\
   Ctrl+arrows  move panel focus      ↑/k, ↓/j     select session\n\
   Home, G      first / last session\n\n\
 Actions\n\
-  Enter         resume in its agent   x             cross-launch agent\n\
-  h             preview handoff       r             rescan local stores\n\n\
+  n             start a new session   Enter         resume in its agent\n\
+  x             cross-launch agent    h             preview handoff\n\
+  r             rescan local stores\n\n\
 Find\n\
   /             search all context    f             structured filters\n\
   Esc           clear search/filters\n\n\
@@ -486,7 +498,8 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::app::Mode;
+    use crate::app::{AppAction, Mode};
+    use crate::launch::LaunchKind;
     use crate::model::{Filters, Handoff};
     use crate::scanner::ScanOptions;
 
@@ -553,6 +566,8 @@ mod tests {
         assert!(output.contains("Build the unified"));
         assert!(output.contains("Codex"));
         assert!(output.contains("OpenCode"));
+        assert!(output.contains("[n - New]"));
+        assert!(output.contains("n new"));
         assert!(output.contains("x launch"));
     }
 
@@ -560,8 +575,8 @@ mod tests {
     fn compact_layout_keeps_core_actions_visible() {
         let output = render(72, 14, &mut app());
         assert!(output.contains("Claude (1)"));
+        assert!(output.contains("[n - New]"));
         assert!(output.contains("resume"));
-        assert!(output.contains("handoff"));
     }
 
     #[test]
@@ -614,5 +629,32 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.active_agent, Agent::Claude);
+    }
+
+    #[test]
+    fn new_session_action_uses_the_focused_agent_and_current_folder() {
+        let mut app = app();
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        let AppAction::Launch(request) = action else {
+            panic!("n should launch a new session");
+        };
+        let LaunchKind::New { agent } = request.kind else {
+            panic!("n should not resume an existing session");
+        };
+        assert_eq!(agent, Agent::Claude);
+        assert_eq!(request.cwd, PathBuf::from("workspace/rejoin"));
+    }
+
+    #[test]
+    fn launch_errors_are_shown_inside_the_session_manager() {
+        let mut app = app();
+
+        app.show_launch_error(&anyhow::anyhow!("program not found"));
+
+        let toast = app.toast.expect("launch failure should be visible");
+        assert!(toast.is_error);
+        assert!(toast.message.contains("program not found"));
     }
 }

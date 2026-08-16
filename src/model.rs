@@ -37,7 +37,16 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Cursor => "cursor-agent",
+            Self::Cursor => {
+                #[cfg(windows)]
+                {
+                    "cursor-agent.cmd"
+                }
+                #[cfg(not(windows))]
+                {
+                    "cursor-agent"
+                }
+            }
             Self::Pi => "pi",
             Self::OpenCode => "opencode",
         }

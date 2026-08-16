@@ -4,6 +4,10 @@ All notable changes to rejoin are documented here.
 
 ## Unreleased
 
+### Features
+
+- Added a `[n - New]` action to start a fresh session in the focused agent panel.
+
 ### Bug fixes
 
 - Excluded Codex and OpenCode sub-agent sessions from the session list.
