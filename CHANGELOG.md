@@ -4,6 +4,10 @@ All notable changes to rejoin are documented here.
 
 ## Unreleased
 
+### Bug fixes
+
+- Excluded Codex and OpenCode sub-agent sessions from the session list.
+
 ### Reliability
 
 - Added failure-safe terminal restoration that attempts raw-mode, alternate-screen, and cursor cleanup on errors and unwinding.
