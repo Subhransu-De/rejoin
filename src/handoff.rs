@@ -550,11 +550,14 @@ fn redact(text: &str) -> String {
     text.lines()
         .map(|line| {
             let lower = line.to_lowercase();
-            let compact = line.split_whitespace().collect::<String>();
-            let assignment = compact.split([';', '{', '}']).any(|word| {
-                let Some((name, _)) = word.split_once(['=', ':']) else {
-                    return false;
-                };
+            let assignment = line.match_indices(['=', ':']).any(|(index, _)| {
+                let prefix = line[..index].trim_end().trim_end_matches(['\'', '"']);
+                let name = prefix
+                    .rsplit(|character: char| {
+                        !character.is_alphanumeric() && !matches!(character, '_' | '-')
+                    })
+                    .next()
+                    .unwrap_or_default();
                 let name = name.to_ascii_lowercase();
                 ["key", "token", "secret", "password"]
                     .iter()
@@ -654,6 +657,8 @@ mod tests {
             "password: synthetic-secret",
             r#"{"api_key": "synthetic-secret"}"#,
             "X-API-Key: synthetic-secret",
+            r#"{"host": "example.invalid", "api_key": "synthetic-secret"}"#,
+            "MODE=synthetic API_KEY=synthetic-secret",
         ] {
             assert!(!redact(text).contains("synthetic-secret"));
         }
