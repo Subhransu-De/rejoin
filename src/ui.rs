@@ -599,6 +599,7 @@ mod tests {
             help_scroll: 0,
             show_archived: false,
             visible_cache: std::cell::RefCell::default(),
+            last_clock_refresh: std::time::Instant::now(),
             scan_task: None,
             handoff_task: None,
             pending_mode: Mode::Normal,
@@ -785,6 +786,20 @@ mod tests {
         assert!(app.visible_indices().is_empty());
         app.search = "session-1".into();
         assert_eq!(app.visible_indices(), vec![0]);
+    }
+
+    #[test]
+    fn clock_refresh_updates_idle_labels_and_recency_results() {
+        let mut app = app();
+        app.filters.recency = crate::model::Recency::Day;
+        app.sessions[0].last_activity = chrono::Utc::now() - chrono::Duration::hours(23);
+        assert_eq!(app.visible_indices(), vec![0]);
+        assert!(!app.tick());
+        app.sessions[0].last_activity = chrono::Utc::now() - chrono::Duration::hours(25);
+        app.last_clock_refresh = std::time::Instant::now() - std::time::Duration::from_secs(61);
+        assert!(app.tick());
+        assert!(app.visible_indices().is_empty());
+        assert!(!app.tick());
     }
 
     #[test]

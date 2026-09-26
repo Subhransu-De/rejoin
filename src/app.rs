@@ -67,6 +67,7 @@ pub struct App {
     pub help_scroll: u16,
     pub show_archived: bool,
     pub visible_cache: RefCell<VisibleCache>,
+    pub last_clock_refresh: Instant,
     pub scan_task: Option<Receiver<scanner::ScanResult>>,
     pub handoff_task: Option<Receiver<Result<Handoff, String>>>,
     pub pending_mode: Mode,
@@ -97,6 +98,7 @@ impl App {
             help_scroll: 0,
             show_archived: false,
             visible_cache: RefCell::default(),
+            last_clock_refresh: Instant::now(),
             scan_task: None,
             handoff_task: None,
             pending_mode: Mode::Normal,
@@ -199,6 +201,13 @@ impl App {
 
     pub fn tick(&mut self) -> bool {
         let mut changed = false;
+        if self.last_clock_refresh.elapsed() >= Duration::from_secs(60) {
+            self.last_clock_refresh = Instant::now();
+            self.visible_cache.borrow_mut().valid = false;
+            self.clamp_selection();
+            self.hydrate_selected_preview();
+            changed = true;
+        }
         if let Some(result) = self
             .scan_task
             .as_ref()
