@@ -1,11 +1,10 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 // Metadata is at the beginning of both formats. A bounded preview keeps startup
@@ -15,29 +14,21 @@ const TAIL_BYTES: u64 = 64 * 1024;
 
 pub fn head_values(path: &Path) -> Result<Vec<Value>> {
     let file = File::open(path).with_context(|| format!("could not open {}", path.display()))?;
-    let mut values = Vec::new();
-    let mut consumed = 0_u64;
-    for line in BufReader::new(file).lines() {
-        let line = line?;
-        consumed += line.len() as u64 + 1;
-        if let Ok(value) = serde_json::from_str(&line) {
-            values.push(value);
-        }
-        if consumed >= HEAD_BYTES {
-            break;
-        }
+    let length = file.metadata()?.len();
+    let mut bytes = Vec::new();
+    file.take(HEAD_BYTES).read_to_end(&mut bytes)?;
+    if length > HEAD_BYTES {
+        bytes.truncate(
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |i| i + 1),
+        );
     }
-    Ok(values)
-}
-
-pub fn first_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let file = File::open(path).with_context(|| format!("could not open {}", path.display()))?;
-    let line = BufReader::new(file)
-        .lines()
-        .next()
-        .transpose()?
-        .context("session transcript is empty")?;
-    serde_json::from_str(&line).with_context(|| format!("invalid JSON in {}", path.display()))
+    Ok(bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect())
 }
 
 pub fn tail_values(path: &Path) -> Result<Vec<Value>> {
@@ -45,9 +36,9 @@ pub fn tail_values(path: &Path) -> Result<Vec<Value>> {
         File::open(path).with_context(|| format!("could not open {}", path.display()))?;
     let length = file.metadata()?.len();
     let offset = length.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(offset))?;
+    file.seek(SeekFrom::Start(offset.saturating_sub(1)))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(TAIL_BYTES + 1).read_to_end(&mut bytes)?;
     // A bounded tail can begin in the middle of a UTF-8 code point. Lossy
     // decoding only affects that discarded partial line and keeps the session
     // discoverable.
@@ -119,15 +110,81 @@ pub fn clean_text(text: &str, max_chars: usize) -> String {
 }
 
 pub fn useful_user_text(text: &str) -> bool {
-    let trimmed = text.trim();
-    !trimmed.is_empty()
-        && !trimmed.starts_with("<system-reminder>")
-        && !trimmed.starts_with("<environment_context>")
-        && !trimmed.starts_with("# AGENTS.md instructions")
-        && trimmed != "Warmup"
+    prompt_text(text).is_some()
+}
+
+pub(crate) fn prompt_text(text: &str) -> Option<String> {
+    let mut text = text.trim().to_owned();
+    if text.starts_with("# AGENTS.md instructions") || text == "Warmup" {
+        return None;
+    }
+    if let Some(start) = text.find("<user_query>") {
+        text = text[start + 12..]
+            .split("</user_query>")
+            .next()?
+            .trim()
+            .to_owned();
+    }
+    for tag in [
+        "system-reminder",
+        "environment_context",
+        "user_instructions",
+        "permissions",
+        "timestamp",
+        "local-command-stdout",
+        "skill",
+    ] {
+        while let Some(start) = text.find(&format!("<{tag}")) {
+            let Some(end) = text[start..].find(&format!("</{tag}>")) else {
+                text.truncate(start);
+                break;
+            };
+            text.replace_range(start..start + end + tag.len() + 3, "");
+        }
+    }
+    if text.trim_start().starts_with("Caveat:") {
+        return None;
+    }
+    if let Some(start) = text.find("<command-name>") {
+        text = text[start + 14..]
+            .split("</command-name>")
+            .next()?
+            .to_owned();
+    }
+    nonempty(&text)
 }
 
 fn nonempty(text: &str) -> Option<String> {
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn metadata_reads_drop_oversized_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"id\":\"synthetic\"}}\n{}\n",
+                serde_json::json!({"text":"x".repeat(1024*1024)})
+            ),
+        )
+        .unwrap();
+        let records = head_values(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], "synthetic");
+    }
+    #[test]
+    fn prompt_wrappers_do_not_become_titles() {
+        assert_eq!(
+            prompt_text("<timestamp>synthetic</timestamp><user_query>Actual task</user_query>")
+                .as_deref(),
+            Some("Actual task")
+        );
+        assert!(prompt_text("<environment_context>synthetic</environment_context>").is_none());
+    }
 }

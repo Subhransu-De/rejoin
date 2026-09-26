@@ -4,11 +4,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState, Wrap,
+    ScrollbarState, Table, Wrap,
 };
 
 use crate::app::{App, Mode};
-use crate::model::{Agent, SessionStatus, relative_time};
+use crate::model::{Agent, SessionStatus, relative_time, truncate_width};
 
 const CLAUDE: Color = Color::Rgb(232, 142, 79);
 const CODEX: Color = Color::Rgb(55, 190, 184);
@@ -23,79 +23,86 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let command_height = if app.mode == Mode::Search { 3 } else { 1 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(command_height)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(if area.height >= 16 { 3 } else { 0 }),
+            Constraint::Length(command_height),
+        ])
         .split(area);
 
     draw_body(frame, app, rows[0]);
+    draw_detail(frame, app, rows[1]);
     if app.mode == Mode::Search {
-        draw_search(frame, app, rows[1]);
+        draw_search(frame, app, rows[2]);
     } else {
-        draw_footer(frame, app, rows[1]);
+        draw_footer(frame, app, rows[2]);
     }
 
     match app.mode {
         Mode::Search => {}
         Mode::Filter => draw_filter(frame, app),
-        Mode::Help => draw_help(frame),
+        Mode::Help => draw_help(frame, app),
+        Mode::Warnings => draw_warnings(frame, app),
         Mode::Handoff => draw_handoff(frame, app),
         Mode::ConfirmLaunch => draw_confirm(frame, app),
         Mode::Normal => {}
     }
-
-    if let Some(toast) = &app.toast {
-        draw_toast(frame, &toast.message, toast.is_error);
-    }
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    if area.width >= 120 {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(33),
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-            ])
-            .split(rows[0]);
-        let bottom = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[1]);
-        draw_sessions(frame, app, Agent::Codex, top[0]);
-        draw_sessions(frame, app, Agent::Claude, top[1]);
-        draw_sessions(frame, app, Agent::Cursor, top[2]);
-        draw_sessions(frame, app, Agent::Pi, bottom[0]);
-        draw_sessions(frame, app, Agent::OpenCode, bottom[1]);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let tabs = Agent::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, agent)| {
+            Span::styled(
+                format!(" {}:{} ", i + 1, agent.label()),
+                if *agent == app.active_agent {
+                    agent_style(*agent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MUTED)
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Line::from(tabs)), rows[0]);
+    app.panel_areas = [Rect::default(); 5];
+    let agents = if area.width < 100 || area.height < 22 {
+        vec![app.active_agent]
     } else {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(33),
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-            ])
-            .split(area);
-        let first = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[0]);
-        let second = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[1]);
-        draw_sessions(frame, app, Agent::Codex, first[0]);
-        draw_sessions(frame, app, Agent::Claude, first[1]);
-        draw_sessions(frame, app, Agent::Cursor, second[0]);
-        draw_sessions(frame, app, Agent::Pi, second[1]);
-        draw_sessions(frame, app, Agent::OpenCode, rows[2]);
+        Agent::ALL
+            .into_iter()
+            .filter(|agent| {
+                *agent == app.active_agent || !app.visible_indices_for(*agent).is_empty()
+            })
+            .collect::<Vec<_>>()
+    };
+    if agents.len() <= 3 {
+        let columns = Layout::horizontal(vec![Constraint::Fill(1); agents.len()]).split(rows[1]);
+        for (agent, area) in agents.iter().zip(columns.iter()) {
+            draw_sessions(frame, app, *agent, *area);
+        }
+    } else {
+        let panels = Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).split(rows[1]);
+        let split = agents.len().div_ceil(2);
+        for (row, group) in [
+            (&panels[0], &agents[..split]),
+            (&panels[1], &agents[split..]),
+        ] {
+            let columns = Layout::horizontal(vec![Constraint::Fill(1); group.len()]).split(*row);
+            for (agent, area) in group.iter().zip(columns.iter()) {
+                draw_sessions(frame, app, *agent, *area);
+            }
+        }
     }
 }
 
-fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
+fn draw_sessions(frame: &mut Frame, app: &mut App, agent: Agent, area: Rect) {
+    let panel = Agent::ALL
+        .iter()
+        .position(|candidate| *candidate == agent)
+        .unwrap_or(0);
+    app.panel_areas[panel] = area;
     let indices = app.visible_indices_for(agent);
     let focused = agent == app.active_agent;
     let border_style = if focused {
@@ -121,7 +128,11 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
         Span::raw(" "),
     ]);
     if indices.is_empty() {
-        let message = if app.agent_session_count(agent) == 0 {
+        let message = if app.scan_task.is_some() {
+            "Scanning sessions…"
+        } else if !app.warnings.is_empty() {
+            "Some stores could not be read. Press ! for details."
+        } else if app.agent_session_count(agent) == 0 {
             "No sessions in this folder."
         } else {
             "No matching sessions."
@@ -148,7 +159,14 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
                 session.status.glyph(),
                 status_style(session.status),
             )),
-            Cell::from(session.title.clone()),
+            Cell::from(truncate_width(
+                &format!(
+                    "{}{}",
+                    if session.archived { "[archived] " } else { "" },
+                    session.title
+                ),
+                usize::from(area.width.saturating_sub(18)),
+            )),
             Cell::from(
                 Line::from(relative_time(session.last_activity)).alignment(Alignment::Center),
             ),
@@ -166,8 +184,7 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
                 Cell::from("Session"),
                 Cell::from(Line::from("Activity").alignment(Alignment::Center)),
             ])
-            .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD))
-            .bottom_margin(1),
+            .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
         )
         .block(
             Block::default()
@@ -183,32 +200,45 @@ fn draw_sessions(frame: &mut Frame, app: &App, agent: Agent, area: Rect) {
             Style::default()
         })
         .highlight_symbol(if focused { "▌" } else { " " });
-    let mut state = TableState::default().with_selected(focused.then(|| app.selection_for(agent)));
-    frame.render_stateful_widget(table, area, &mut state);
+    app.table_states[panel].select(Some(app.selection_for(agent)));
+    frame.render_stateful_widget(table, area, &mut app.table_states[panel]);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(toast) = &app.toast {
+        frame.render_widget(
+            Paragraph::new(truncate_width(&toast.message, usize::from(area.width))).style(
+                Style::default().fg(if toast.is_error {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
+            ),
+            area,
+        );
+        return;
+    }
     let full_folder = app
         .scan_options
         .scope
         .as_ref()
         .map(|scope| format!(" {} ", scope.display()))
         .unwrap_or_else(|| " all folders ".to_owned());
-    let max_folder_width = (area.width.saturating_mul(45) / 100).max(1);
+    let max_folder_width = (area.width.saturating_mul(45) / 100).min(area.width.saturating_sub(44));
     let folder = truncate_left(&full_folder, usize::from(max_folder_width));
-    let folder_width = folder.chars().count() as u16;
+    let folder_width = unicode_width::UnicodeWidthStr::width(folder.as_str()) as u16;
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(folder_width)])
         .split(area);
     let content = match app.mode {
-        Mode::Normal if columns[0].width < 100 => " n new   ↑↓   Ctrl+←→   ↵ resume ",
+        Mode::Normal if columns[0].width < 100 => " ? help  q quit  n new  ↵ resume ",
         Mode::Normal => {
-            " n new   ↑/↓ session   Ctrl+arrows panel   ↵ resume   h handoff   x launch   / search   f filter   ? help   q quit "
+            " n new   ↑/↓ session   Tab panel   ↵ resume   h handoff   x launch   / search   f filter   ? help   q quit "
         }
         Mode::Search => " type to search   ↵ keep   Esc clear ",
         Mode::Filter => " ↑↓ field   ←→ choose   type values   ↵ apply   Esc cancel ",
-        Mode::Help => " Esc close ",
+        Mode::Help | Mode::Warnings => " ↑↓ scroll   Esc close ",
         Mode::Handoff => " ↑↓ scroll   c copy   w write   x choose receiving agent   Esc close ",
         Mode::ConfirmLaunch => " ←→ choose agent   ↵ launch with handoff   Esc review ",
     };
@@ -216,6 +246,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .fg(Color::Black)
         .bg(Color::Rgb(180, 190, 210));
     frame.render_widget(Block::default().style(footer_style), area);
+    let content = if !app.warnings.is_empty() {
+        format!(" !{} {content}", app.warnings.len())
+    } else if app.scan_task.is_some() {
+        format!(" Scanning…  {content}")
+    } else {
+        content.to_owned()
+    };
     frame.render_widget(Paragraph::new(content).style(footer_style), columns[0]);
     frame.render_widget(
         Paragraph::new(folder)
@@ -226,28 +263,31 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn truncate_left(value: &str, max_width: usize) -> String {
-    if value.chars().count() <= max_width {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if value.width() <= max_width {
         return value.to_owned();
     }
-    if max_width <= 1 {
-        return "…".chars().take(max_width).collect();
+    if max_width == 0 {
+        return String::new();
     }
-    let tail = value
-        .chars()
-        .rev()
-        .take(max_width - 1)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    format!("…{tail}")
+    let mut used = 1;
+    let mut tail = Vec::new();
+    for character in value.chars().rev() {
+        let width = character.width().unwrap_or(0);
+        if used + width > max_width {
+            break;
+        }
+        tail.push(character);
+        used += width;
+    }
+    format!("…{}", tail.into_iter().rev().collect::<String>())
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
-        .title(" Search all session context ");
+        .title(" Search sessions ");
     let input_area = block.inner(area);
     frame.render_widget(block, area);
 
@@ -268,7 +308,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(" / ", Style::default().fg(ACCENT)),
             Span::styled(
-                app.search.as_str(),
+                truncate_left(&app.search, usize::from(columns[0].width.saturating_sub(4))),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled("█", Style::default().fg(ACCENT)),
@@ -321,34 +361,40 @@ fn draw_filter(frame: &mut Frame, app: &App) {
     );
 }
 
-fn draw_help(frame: &mut Frame) {
-    let area = centered(frame.area(), 76, 22);
+fn draw_help(frame: &mut Frame, app: &App) {
+    let area = centered(
+        frame.area(),
+        90,
+        26.min(frame.area().height.saturating_sub(2)),
+    );
     frame.render_widget(Clear, area);
     let help = "\
 Navigation\n\
-  Ctrl+arrows  move panel focus      ↑/k, ↓/j     select session\n\
+  Tab/Shift+Tab or 1–5: panels; Ctrl+arrows: adjacent panel      ↑/k, ↓/j     select session\n\
   Home, G      first / last session\n\n\
 Actions\n\
   n             start a new session   Enter         resume in its agent\n\
   x             cross-launch agent    h             preview handoff\n\
   r             rescan local stores\n\n\
 Find\n\
-  /             search all context    f             structured filters\n\
-  Esc           clear search/filters\n\n\
+  /             search sessions    f             structured filters\n\
+  Esc           clear search/filters    q / Ctrl+C    quit\n\
+  a             show archived sessions  !             scanner warnings\n\n\
 Handoff\n\
-  c             copy Markdown         w             save in working directory\n\
+  c             copy Markdown         w             save outside the repository\n\
   x             choose any other agent for the reviewed package\n\n\
 Scope\n\
   By default only the exact current folder is shown. Use rejoin --all for all folders.\n\n\
-Status uses shape and text as well as color. Active detection combines process\n\
-arguments with the newest session in each live agent workspace.";
+Status: ● active (session id matched), ◐ recent (<24h), ○ stale, × error.\n\
+Workspace matches alone do not prove that a session is running.";
     frame.render_widget(
         Paragraph::new(help)
+            .scroll((app.help_scroll, 0))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(ACCENT))
-                    .title(" Help "),
+                    .title(" Help · ↑↓ scroll · Esc close "),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -359,14 +405,22 @@ fn draw_handoff(frame: &mut Frame, app: &App) {
     let area = if frame.area().width < 120 {
         frame.area().inner(Margin::new(2, 1))
     } else {
-        centered(frame.area(), 82, 84)
+        centered(
+            frame.area(),
+            90,
+            frame.area().height.saturating_mul(84) / 100,
+        )
     };
     frame.render_widget(Clear, area);
     let markdown = app
         .handoff
         .as_ref()
         .map(|handoff| handoff.markdown.as_str())
-        .unwrap_or("Handoff unavailable.");
+        .unwrap_or(if app.handoff_task.is_some() {
+            "Building handoff…"
+        } else {
+            "Handoff unavailable."
+        });
     frame.render_widget(
         Paragraph::new(markdown)
             .block(
@@ -391,13 +445,13 @@ fn draw_handoff(frame: &mut Frame, app: &App) {
 }
 
 fn draw_confirm(frame: &mut Frame, app: &App) {
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app.handoff_session.as_ref() else {
         return;
     };
     let Some(target) = app.launch_target else {
         return;
     };
-    let area = centered(frame.area(), 64, 9);
+    let area = centered(frame.area(), 90, 9);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(vec![
@@ -432,35 +486,9 @@ fn draw_confirm(frame: &mut Frame, app: &App) {
     );
 }
 
-fn draw_toast(frame: &mut Frame, message: &str, is_error: bool) {
-    let width = (message.chars().count() as u16 + 4)
-        .min(frame.area().width.saturating_sub(4))
-        .max(20);
-    let area = Rect::new(
-        frame.area().right().saturating_sub(width + 2),
-        frame.area().bottom().saturating_sub(4),
-        width,
-        3,
-    );
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(message)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).border_style(
-                Style::default().fg(if is_error { Color::Red } else { Color::Green }),
-            )),
-        area,
-    );
-}
-
 fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     let width = area.width.saturating_mul(width_percent).saturating_div(100);
-    let height = if height <= 100 {
-        area.height.saturating_mul(height).saturating_div(100)
-    } else {
-        height.min(area.height)
-    };
+    let height = height.min(area.height);
     Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,
@@ -488,6 +516,45 @@ fn status_style(status: SessionStatus) -> Style {
     })
 }
 
+fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    let details = vec![
+        Line::from(truncate_width(&session.title, usize::from(area.width))),
+        Line::from(truncate_width(
+            &format!(
+                "{} · {} · {} · {} · {}",
+                session.status.label(),
+                session.branch.as_deref().unwrap_or("no branch"),
+                session.last_activity.format("%Y-%m-%d %H:%M UTC"),
+                session.id,
+                session.cwd.display()
+            ),
+            usize::from(area.width),
+        )),
+        Line::from(truncate_width(&session.preview, usize::from(area.width))),
+    ];
+    frame.render_widget(Paragraph::new(details), area);
+}
+
+fn draw_warnings(frame: &mut Frame, app: &App) {
+    let area = centered(frame.area(), 95, frame.area().height.saturating_sub(2));
+    frame.render_widget(Clear, area);
+    let text = if app.warnings.is_empty() {
+        "No scanner warnings.".to_owned()
+    } else {
+        app.warnings.join("\n\n")
+    };
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((app.help_scroll, 0))
+            .block(Block::bordered().title(" Scanner warnings · ↑↓ scroll · Esc close ")),
+        area,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -502,6 +569,7 @@ mod tests {
     use crate::launch::LaunchKind;
     use crate::model::{Filters, Handoff};
     use crate::scanner::ScanOptions;
+    use ratatui::widgets::TableState;
 
     fn app() -> App {
         App {
@@ -522,6 +590,14 @@ mod tests {
                 preview_loaded: true,
             }],
             warnings: Vec::new(),
+            table_states: std::array::from_fn(|_| TableState::default()),
+            panel_areas: [Rect::default(); 5],
+            help_scroll: 0,
+            show_archived: false,
+            visible_cache: std::cell::RefCell::default(),
+            scan_task: None,
+            handoff_task: None,
+            pending_mode: Mode::Normal,
             scan_options: ScanOptions {
                 claude_home: PathBuf::from(".claude"),
                 codex_home: PathBuf::from(".codex"),
@@ -539,6 +615,7 @@ mod tests {
             filter_field: 0,
             mode: Mode::Normal,
             handoff: None,
+            handoff_session: None,
             handoff_scroll: 0,
             launch_target: None,
             toast: None,
@@ -596,7 +673,7 @@ mod tests {
 
         let output = render(140, 30, &mut app);
 
-        assert!(output.contains("Search all session context"));
+        assert!(output.contains("Search sessions"));
         assert!(output.contains("/ cursor█"));
         assert!(output.contains("Enter keep"));
         assert!(output.contains("Esc clear"));
@@ -656,5 +733,88 @@ mod tests {
         let toast = app.toast.expect("launch failure should be visible");
         assert!(toast.is_error);
         assert!(toast.message.contains("program not found"));
+    }
+
+    #[test]
+    fn overlays_have_readable_content_at_supported_sizes() {
+        for (width, height) in [(60, 12), (80, 24), (120, 40), (160, 42)] {
+            let mut app = app();
+            app.mode = Mode::ConfirmLaunch;
+            app.launch_target = Some(Agent::Codex);
+            app.handoff_session = Some(app.sessions[0].clone());
+            let output = render(width, height, &mut app);
+            assert!(output.contains("Launch Codex in:"));
+            app.mode = Mode::Filter;
+            assert!(render(width, height, &mut app).contains("Recency"));
+            app.mode = Mode::Help;
+            assert!(render(width, height, &mut app).contains("Navigation"));
+        }
+    }
+
+    #[test]
+    fn upward_navigation_keeps_the_scroll_offset() {
+        let mut app = app();
+        let session = app.sessions[0].clone();
+        app.sessions = (0..40)
+            .map(|index| {
+                let mut item = session.clone();
+                item.id = format!("synthetic-{index}");
+                item.title = format!("Synthetic session {index:02}");
+                item
+            })
+            .collect();
+        app.selected = 30;
+        render(80, 24, &mut app);
+        let offset = app.table_states[1].offset();
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        render(80, 24, &mut app);
+        assert_eq!(app.table_states[1].offset(), offset);
+        assert_eq!(app.table_states[1].selected(), Some(29));
+    }
+
+    #[test]
+    fn search_is_independent_of_preview_hydration() {
+        let mut app = app();
+        app.search = "synthetic-preview-only".into();
+        assert!(app.visible_indices().is_empty());
+        app.sessions[0].preview = "synthetic-preview-only".into();
+        assert!(app.visible_indices().is_empty());
+        app.search = "session-1".into();
+        assert_eq!(app.visible_indices(), vec![0]);
+    }
+
+    #[test]
+    fn escape_clears_and_control_c_quits_in_every_mode() {
+        let mut app = app();
+        assert!(matches!(
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            AppAction::None
+        ));
+        for mode in [
+            Mode::Normal,
+            Mode::Help,
+            Mode::Search,
+            Mode::Filter,
+            Mode::Handoff,
+            Mode::ConfirmLaunch,
+            Mode::Warnings,
+        ] {
+            app.mode = mode;
+            assert!(matches!(
+                app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                AppAction::Quit
+            ));
+        }
+    }
+
+    #[test]
+    fn warnings_and_compact_help_remain_visible() {
+        let mut app = app();
+        app.warnings.push("Synthetic unreadable store".into());
+        app.mode = Mode::Warnings;
+        assert!(render(80, 24, &mut app).contains("Synthetic unreadable store"));
+        app.mode = Mode::Normal;
+        assert!(render(60, 12, &mut app).contains("? help"));
+        assert!(render(60, 12, &mut app).contains("q quit"));
     }
 }

@@ -11,10 +11,21 @@ pub fn scan(database: &Path) -> Result<Vec<Session>> {
         return Ok(Vec::new());
     }
     let connection = open(database)?;
-    let mut statement = connection.prepare(
-        "SELECT s.id, s.directory, s.title, s.time_updated, s.time_archived \
-         FROM session s WHERE s.parent_id IS NULL ORDER BY s.time_updated DESC",
-    )?;
+    let columns = connection
+        .prepare("PRAGMA table_info(session)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let archived = if columns.iter().any(|column| column == "time_archived") {
+        "s.time_archived"
+    } else {
+        "NULL"
+    };
+    let parent = if columns.iter().any(|column| column == "parent_id") {
+        "WHERE s.parent_id IS NULL"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!("SELECT s.id, s.directory, s.title, s.time_updated, {archived} FROM session s {parent} ORDER BY s.time_updated DESC"))?;
     let rows = statement.query_map([], |row| {
         let cwd = PathBuf::from(row.get::<_, String>(1)?);
         Ok(Session {
@@ -38,8 +49,21 @@ pub fn scan(database: &Path) -> Result<Vec<Session>> {
             preview_loaded: false,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("could not read OpenCode sessions")
+    let mut sessions = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("could not read OpenCode sessions")?;
+    for session in &mut sessions {
+        if (session.title.trim().is_empty() || session.title.starts_with("New session"))
+            && let Ok(history) = text_history(database, &session.id)
+            && let Some(text) = history
+                .into_iter()
+                .filter(|(role, _)| role == "user")
+                .find_map(|(_, text)| super::common::prompt_text(&text))
+        {
+            session.title = super::common::clean_text(&text, 72);
+        }
+    }
+    Ok(sessions)
 }
 
 pub(crate) fn load_preview(database: &Path, session_id: &str) -> Result<String> {

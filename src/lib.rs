@@ -70,7 +70,7 @@ enum Command {
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
-pub fn run() -> Result<()> {
+pub fn run() -> Result<i32> {
     let cli = Cli::parse();
     let options = ScanOptions::discover(
         cli.claude_home,
@@ -81,10 +81,10 @@ pub fn run() -> Result<()> {
         cli.all,
     )?;
     match cli.command {
-        Some(Command::List { json }) => list_sessions(&options, json),
+        Some(Command::List { json }) => list_sessions(&options, json).map(|()| 0),
         Some(Command::Paths) => {
             print_paths(&options);
-            Ok(())
+            Ok(0)
         }
         None => run_tui(options),
     }
@@ -121,11 +121,11 @@ fn list_sessions(options: &ScanOptions, json: bool) -> Result<()> {
         );
         for session in &result.sessions {
             println!(
-                "{:<8} {:<8} {:<20.20} {:<48.48} {}",
+                "{:<8} {:<8} {} {} {}",
                 session.status.label(),
                 session.agent.label(),
-                session.project,
-                session.title,
+                model::padded(&session.project, 20),
+                model::padded(&session.title, 48),
                 model::relative_time(session.last_activity),
             );
         }
@@ -136,7 +136,7 @@ fn list_sessions(options: &ScanOptions, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_tui(options: ScanOptions) -> Result<()> {
+fn run_tui(options: ScanOptions) -> Result<i32> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("rejoin requires an interactive terminal; use `rejoin list --json` for scripts");
     }
@@ -145,16 +145,22 @@ fn run_tui(options: ScanOptions) -> Result<()> {
     let mut terminal = TerminalSession::enter()?;
     let mut app = App::load(options);
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<i32> {
+        let mut dirty = true;
         loop {
-            terminal
-                .terminal_mut()?
-                .draw(|frame| ui::draw(frame, &mut app))?;
-            app.tick();
+            dirty |= app.tick();
+            if dirty {
+                terminal
+                    .terminal_mut()?
+                    .draw(|frame| ui::draw(frame, &mut app))?;
+                dirty = false;
+            }
             if !event::poll(Duration::from_millis(250))? {
                 continue;
             }
-            let Event::Key(key) = event::read()? else {
+            let event = event::read()?;
+            dirty = true;
+            let Event::Key(key) = event else {
                 continue;
             };
             match app.handle_key(key) {
@@ -170,14 +176,11 @@ fn run_tui(options: ScanOptions) -> Result<()> {
                             continue;
                         }
                     };
-                    if !status.success() {
-                        bail!("agent exited with status {status}");
-                    }
-                    return Ok(());
+                    return Ok(status.code().unwrap_or(1));
                 }
             }
         }
-        Ok(())
+        Ok(0)
     })();
 
     finish_with_cleanup(result, terminal.restore())
@@ -223,16 +226,15 @@ impl TerminalSession {
     }
 
     fn prepare_for_agent(&mut self) -> Result<()> {
-        // Keep rejoin's alternate screen active while the child owns the terminal.
-        // Inline TUIs can then render freely without polluting the shell's primary
-        // buffer; restore returns to that buffer after the agent exits.
         if self.raw_mode_enabled {
             disable_raw_mode().context("could not disable terminal raw mode")?;
             self.raw_mode_enabled = false;
         }
-        let terminal = self.terminal_mut()?;
-        terminal.clear()?;
-        terminal.show_cursor()?;
+        if self.alternate_screen_entered {
+            execute!(io::stdout(), LeaveAlternateScreen)?;
+            self.alternate_screen_entered = false;
+        }
+        self.terminal_mut()?.show_cursor()?;
         Ok(())
     }
 
@@ -285,15 +287,15 @@ impl Drop for TerminalSession {
     }
 }
 
-fn finish_with_cleanup(result: Result<()>, cleanup: Result<()>) -> Result<()> {
+fn finish_with_cleanup<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
     match (result, cleanup) {
         (Err(error), Err(cleanup_error)) => {
             eprintln!("warning: terminal cleanup also failed: {cleanup_error:#}");
             Err(error)
         }
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
     }
 }
 

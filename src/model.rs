@@ -37,16 +37,7 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Cursor => {
-                #[cfg(windows)]
-                {
-                    "cursor-agent.cmd"
-                }
-                #[cfg(not(windows))]
-                {
-                    "cursor-agent"
-                }
-            }
+            Self::Cursor => "cursor-agent",
             Self::Pi => "pi",
             Self::OpenCode => "opencode",
         }
@@ -118,7 +109,7 @@ impl Session {
             self.branch.as_deref().unwrap_or_default(),
             self.cwd.display(),
             self.title,
-            self.preview
+            self.id
         )
         .to_lowercase()
     }
@@ -172,7 +163,7 @@ impl Recency {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filters {
     pub project: String,
     pub repository: String,
@@ -218,4 +209,32 @@ pub fn relative_time(time: DateTime<Utc>) -> String {
     } else {
         time.format("%Y-%m-%d").to_string()
     }
+}
+
+pub fn truncate_width(value: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if value.width() <= width {
+        return value.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for character in value.chars() {
+        let cells = character.width().unwrap_or(0);
+        if used + cells >= width {
+            break;
+        }
+        result.push(character);
+        used += cells;
+    }
+    result.push('…');
+    result
+}
+
+pub fn padded(value: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let text = truncate_width(value, width);
+    format!("{}{}", text, " ".repeat(width.saturating_sub(text.width())))
 }

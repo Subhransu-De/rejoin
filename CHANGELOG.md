@@ -4,6 +4,12 @@ All notable changes to rejoin are documented here.
 
 ## Unreleased
 
+- Fixed dialog sizing, scrolling, compact layouts, warning visibility, stable search, and keyboard navigation.
+- Moved scanning and handoff generation off the UI thread and avoided idle list rebuilding.
+- Hardened session parsing, title selection, partial scan failures, path handling, activity detection, and cache persistence.
+- Preserved recent handoff instructions, masked common credential patterns, and stored handoffs outside working directories.
+- Fixed agent wrapper launches, terminal ownership, interrupt handling, custom Pi session paths, and child exit codes.
+
 ## [0.2.0] - 2026-08-16
 
 ### Features
