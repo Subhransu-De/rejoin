@@ -71,7 +71,7 @@ pub fn generate(session: &Session) -> Result<Handoff> {
     let markdown = redact(&render(session, &evidence));
     Ok(Handoff {
         markdown,
-        suggested_name: format!("HANDOFF-{}.md", slugify(&session.title)),
+        suggested_name: format!("HANDOFF-{}.md", slugify(&redact_record(&session.title))),
     })
 }
 
@@ -690,5 +690,31 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn generated_filename_does_not_include_title_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript = directory.path().join("synthetic.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let session = Session {
+            id: "synthetic".into(),
+            agent: Agent::Codex,
+            project: "synthetic".into(),
+            repository: None,
+            branch: None,
+            cwd: directory.path().to_path_buf(),
+            title: "sk-synthetic-secret".into(),
+            status: crate::model::SessionStatus::Stale,
+            last_activity: chrono::DateTime::UNIX_EPOCH,
+            transcript,
+            preview: String::new(),
+            archived: false,
+            parse_error: None,
+            preview_loaded: true,
+        };
+        let handoff = generate(&session).unwrap();
+        assert!(!handoff.markdown.contains("synthetic-secret"));
+        assert!(!handoff.suggested_name.contains("synthetic-secret"));
     }
 }

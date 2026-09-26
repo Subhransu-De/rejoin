@@ -191,6 +191,17 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
     };
 
     result.warnings.extend(cache.warnings());
+    result
+        .warnings
+        .extend(result.sessions.iter().filter_map(|session| {
+            session.parse_error.as_ref().map(|error| {
+                format!(
+                    "{} {}: {error}",
+                    session.agent.label(),
+                    session.transcript.display()
+                )
+            })
+        }));
     let cache_started = Instant::now();
     if let Err(error) = cache.save_if_dirty(&result.sessions) {
         result.warnings.push(format!("Cache: {error:#}"));
@@ -329,25 +340,33 @@ fn scan_agent_processes() -> ProcessSnapshot {
             .map(|part| part.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         for agent in Agent::ALL {
-            let binary = agent.binary();
-            if name == binary
-                || name == format!("{binary}.exe")
-                || args.iter().take(3).any(|arg| {
-                    let normalized = arg.replace('\\', "/");
-                    let base = normalized.rsplit('/').next().unwrap_or_default();
-                    base == binary
-                        || base == format!("{binary}.js")
-                        || base == format!("{binary}.cmd")
-                        || (agent == Agent::Claude
-                            && normalized.contains("/@anthropic-ai/claude-code/"))
-                        || (agent == Agent::Pi && normalized.contains("/pi-coding-agent/"))
-                })
-            {
+            if command_matches_agent(&name, &args, agent) {
                 snapshot.commands.push((agent, args.clone()));
             }
         }
     }
     snapshot
+}
+
+fn command_matches_agent(name: &str, args: &[String], agent: Agent) -> bool {
+    let binary = agent.binary();
+    let matches_binary = |arg: &String| {
+        let normalized = arg.replace('\\', "/");
+        let base = normalized.rsplit('/').next().unwrap_or_default();
+        base == binary
+            || base == format!("{binary}.js")
+            || base == format!("{binary}.cmd")
+            || (agent == Agent::Claude && normalized.contains("/@anthropic-ai/claude-code/"))
+            || (agent == Agent::Pi && normalized.contains("/pi-coding-agent/"))
+    };
+    if matches!(name, "wsl" | "wsl.exe") {
+        return args
+            .iter()
+            .position(|arg| arg == "--")
+            .and_then(|index| args.get(index + 1))
+            .is_some_and(matches_binary);
+    }
+    name == binary || name == format!("{binary}.exe") || args.iter().take(3).any(matches_binary)
 }
 
 fn apply_process_status(sessions: &mut [Session], snapshot: &ProcessSnapshot) {
@@ -383,8 +402,7 @@ fn retain_scope(sessions: &mut Vec<Session>, scope: &Path) {
         .into_iter()
         .filter(|cwd| normalize_path(cwd) == normalized_scope)
         .collect::<HashSet<_>>();
-    sessions
-        .retain(|session| session.parse_error.is_some() || matching_cwds.contains(&session.cwd));
+    sessions.retain(|session| matching_cwds.contains(&session.cwd));
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -664,6 +682,49 @@ fn visit(directory: &Path, files: &mut Vec<PathBuf>, cache: &SessionCache) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_wsl_agent_after_launch_options() {
+        let args = [
+            "wsl.exe",
+            "--distribution",
+            "SyntheticDistro",
+            "--cd",
+            "/synthetic",
+            "--",
+            "cursor-agent",
+            "--resume",
+            "synthetic-id",
+        ]
+        .map(str::to_owned);
+        assert!(command_matches_agent("wsl.exe", &args, Agent::Cursor));
+        assert!(!command_matches_agent("wsl.exe", &args, Agent::Codex));
+        let unrelated = ["wsl.exe", "--", "echo", "cursor-agent"].map(str::to_owned);
+        assert!(!command_matches_agent("wsl.exe", &unrelated, Agent::Cursor));
+    }
+
+    #[test]
+    fn malformed_sessions_outside_scope_are_warnings() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions = directory.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        std::fs::write(sessions.join("synthetic.jsonl"), "{").unwrap();
+        let result = scan(&ScanOptions {
+            claude_home: directory.path().join("claude"),
+            codex_home: directory.path().join("codex"),
+            cursor_home: directory.path().join("cursor"),
+            pi_sessions: sessions,
+            opencode_database: directory.path().join("opencode.db"),
+            scope: Some(directory.path().join("unrelated-project")),
+        });
+        assert!(result.sessions.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("synthetic.jsonl"))
+        );
+    }
 
     #[test]
     #[cfg(windows)]
