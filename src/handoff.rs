@@ -546,7 +546,7 @@ fn redact_record(text: &str) -> String {
     }
 }
 
-pub(crate) fn redact(text: &str) -> String {
+fn redact(text: &str) -> String {
     text.lines()
         .map(|line| {
             let lower = line.to_lowercase();

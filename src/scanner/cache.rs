@@ -48,7 +48,7 @@ pub struct SessionCache {
 
 impl SessionCache {
     #[cfg(test)]
-    pub fn test_cache() -> Self {
+    pub(crate) fn test_cache() -> Self {
         Self {
             path: None,
             entries: HashMap::new(),
