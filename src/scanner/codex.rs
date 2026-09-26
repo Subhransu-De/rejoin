@@ -13,7 +13,6 @@ use crate::model::{Agent, Session, SessionStatus};
 use super::cache::SessionCache;
 use super::common::{
     clean_text, head_values, message_text, modified_time, prompt_text, tail_values,
-    useful_user_text,
 };
 use super::{jsonl_files, parallel_map, profile};
 
@@ -245,10 +244,10 @@ fn load_history_titles(path: &Path, titles: &mut HashMap<String, String>) {
         else {
             continue;
         };
-        if useful_user_text(text) {
+        if let Some(text) = prompt_text(text) {
             titles
                 .entry(id.to_owned())
-                .or_insert_with(|| clean_text(text, 72));
+                .or_insert_with(|| clean_text(&text, 72));
         }
     }
 }
@@ -354,5 +353,15 @@ mod tests {
                 .title,
             "Build synthetic parser"
         );
+    }
+
+    #[test]
+    fn history_titles_use_extracted_prompt_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.jsonl");
+        fs::write(&path, r#"{"session_id":"synthetic","text":"<timestamp>synthetic</timestamp><user_query>Actual task</user_query>"}"#).unwrap();
+        let mut titles = HashMap::new();
+        load_history_titles(&path, &mut titles);
+        assert_eq!(titles["synthetic"], "Actual task");
     }
 }

@@ -109,10 +109,6 @@ pub fn clean_text(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub fn useful_user_text(text: &str) -> bool {
-    prompt_text(text).is_some()
-}
-
 pub(crate) fn prompt_text(text: &str) -> Option<String> {
     let mut text = text.trim().to_owned();
     if text.starts_with("# AGENTS.md instructions") || text == "Warmup" {

@@ -12,7 +12,6 @@ use crate::model::{Agent, Session, SessionStatus};
 use super::cache::SessionCache;
 use super::common::{
     clean_text, head_values, message_text, modified_time, prompt_text, tail_values,
-    useful_user_text,
 };
 use super::{jsonl_files, parallel_map, profile};
 
@@ -129,10 +128,12 @@ fn load_history(path: &Path) -> HashMap<String, String> {
         let Some(display) = value.get("display").and_then(Value::as_str) else {
             continue;
         };
-        if useful_user_text(display) && !display.starts_with('/') {
+        if let Some(display) = prompt_text(display)
+            && !display.starts_with('/')
+        {
             history
                 .entry(id.to_owned())
-                .or_insert_with(|| clean_text(display, 72));
+                .or_insert_with(|| clean_text(&display, 72));
         }
     }
     history
@@ -204,5 +205,13 @@ mod tests {
             .title,
             "Synthetic renamed title"
         );
+    }
+
+    #[test]
+    fn history_titles_use_extracted_prompt_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.jsonl");
+        fs::write(&path, r#"{"sessionId":"synthetic","display":"<timestamp>synthetic</timestamp><user_query>Actual task</user_query>"}"#).unwrap();
+        assert_eq!(load_history(&path)["synthetic"], "Actual task");
     }
 }

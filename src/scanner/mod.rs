@@ -111,7 +111,14 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
             let stage = Instant::now();
             let sessions = if options.opencode_database.is_dir() {
                 let mut sessions = Vec::new();
-                for entry in std::fs::read_dir(&options.opencode_database)?.flatten() {
+                for entry in std::fs::read_dir(&options.opencode_database)? {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            cache.warn(format!("OpenCode: {error}"));
+                            continue;
+                        }
+                    };
                     let path = entry.path();
                     if path
                         .file_name()
@@ -126,6 +133,18 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
                         }
                     }
                 }
+                sessions.sort_by_cached_key(|session| {
+                    std::cmp::Reverse((
+                        session.last_activity,
+                        session
+                            .transcript
+                            .metadata()
+                            .and_then(|metadata| metadata.modified())
+                            .ok(),
+                    ))
+                });
+                let mut seen = HashSet::new();
+                sessions.retain(|session| seen.insert(session.id.clone()));
                 Ok(sessions)
             } else {
                 opencode::scan(&options.opencode_database)
@@ -723,6 +742,34 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("synthetic.jsonl"))
+        );
+    }
+
+    #[test]
+    fn duplicate_opencode_sessions_prefer_latest_activity() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, timestamp) in [("opencode.db", 5), ("opencode-backup.db", 1)] {
+            let connection = rusqlite::Connection::open(directory.path().join(name)).unwrap();
+            connection.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_updated INTEGER);").unwrap();
+            connection
+                .execute(
+                    "INSERT INTO session VALUES ('synthetic', '/synthetic', 'Synthetic task', ?1)",
+                    [timestamp],
+                )
+                .unwrap();
+        }
+        let result = scan(&ScanOptions {
+            claude_home: directory.path().join("claude"),
+            codex_home: directory.path().join("codex"),
+            cursor_home: directory.path().join("cursor"),
+            pi_sessions: directory.path().join("pi"),
+            opencode_database: directory.path().to_path_buf(),
+            scope: None,
+        });
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(
+            result.sessions[0].transcript,
+            directory.path().join("opencode.db")
         );
     }
 
