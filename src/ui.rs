@@ -224,7 +224,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .as_ref()
         .map(|scope| format!(" {} ", scope.display()))
         .unwrap_or_else(|| " all folders ".to_owned());
-    let max_folder_width = (area.width.saturating_mul(45) / 100).min(area.width.saturating_sub(44));
+    let max_folder_width = if app.mode == Mode::Normal {
+        (area.width.saturating_mul(45) / 100).min(area.width.saturating_sub(44))
+    } else {
+        0
+    };
     let folder = truncate_left(&full_folder, usize::from(max_folder_width));
     let folder_width = unicode_width::UnicodeWidthStr::width(folder.as_str()) as u16;
     let columns = Layout::default()
@@ -239,7 +243,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Search => " type to search   ↵ keep   Esc clear ",
         Mode::Filter => " ↑↓ field   ←→ choose   type values   ↵ apply   Esc cancel ",
         Mode::Help | Mode::Warnings => " ↑↓ scroll   Esc close ",
-        Mode::Handoff => " ↑↓ scroll   c copy   w write   x choose receiving agent   Esc close ",
+        Mode::Handoff => " ↑↓ scroll  c copy  w save  x choose agent  Esc close ",
         Mode::ConfirmLaunch => " ←→ choose agent   ↵ launch with handoff   Esc review ",
     };
     let footer_style = Style::default()
@@ -690,7 +694,7 @@ mod tests {
         let output = render(100, 28, &mut app);
         assert!(output.contains("Agent-neutral handoff"));
         assert!(output.contains("Remaining work"));
-        assert!(output.contains("choose receiving agent"));
+        assert!(output.contains("choose agent"));
     }
 
     #[test]
@@ -816,5 +820,7 @@ mod tests {
         app.mode = Mode::Normal;
         assert!(render(60, 12, &mut app).contains("? help"));
         assert!(render(60, 12, &mut app).contains("q quit"));
+        app.mode = Mode::Handoff;
+        assert!(render(60, 12, &mut app).contains("Esc close"));
     }
 }

@@ -552,7 +552,7 @@ fn redact(text: &str) -> String {
             let lower = line.to_lowercase();
             let compact = line.split_whitespace().collect::<String>();
             let assignment = compact.split([';', '{', '}']).any(|word| {
-                let Some((name, _)) = word.split_once('=') else {
+                let Some((name, _)) = word.split_once(['=', ':']) else {
                     return false;
                 };
                 let name = name.to_ascii_lowercase();
@@ -651,6 +651,9 @@ mod tests {
             "curl -H \"Authorization: Bearer synthetic-secret\"",
             "https://synthetic:synthetic-secret@example.invalid/path",
             "ghp_synthetic-secret",
+            "password: synthetic-secret",
+            r#"{"api_key": "synthetic-secret"}"#,
+            "X-API-Key: synthetic-secret",
         ] {
             assert!(!redact(text).contains("synthetic-secret"));
         }
