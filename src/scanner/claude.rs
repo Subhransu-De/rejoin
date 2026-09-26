@@ -11,29 +11,23 @@ use crate::model::{Agent, Session, SessionStatus};
 
 use super::cache::SessionCache;
 use super::common::{
-    clean_text, head_values, message_text, modified_time, tail_values, useful_user_text,
+    clean_text, head_values, message_text, modified_time, prompt_text, tail_values,
 };
 use super::{jsonl_files, parallel_map, profile};
 
 pub fn scan(home: &Path, cache: &SessionCache) -> Result<Vec<Session>> {
-    let history = load_history(&home.join("history.jsonl"));
+    let history = cache.titles(&home.join("history.jsonl"), load_history);
     let projects = home.join("projects");
     let enumerate_started = Instant::now();
-    let files = jsonl_files(&projects)?;
+    let files = jsonl_files(&projects, cache)?;
     profile("claude files", enumerate_started);
     let parse_started = Instant::now();
-    let sessions = parallel_map(files, |path| {
-        let mut session = match cache.get(&path) {
-            Some(session) => session,
-            None => match parse_session(&path, &history) {
-                Ok(session) => session,
-                Err(error) => error_session(path, error),
-            },
-        };
-        if let Some(title) = history.get(&session.id) {
-            session.title.clone_from(title);
-        }
-        session
+    let sessions = parallel_map(files, |path| match cache.get(&path) {
+        Some(session) => session,
+        None => match parse_session(&path, &history) {
+            Ok(session) => session,
+            Err(error) => error_session(path, error),
+        },
     });
     profile("claude parse", parse_started);
     Ok(sessions)
@@ -47,10 +41,11 @@ fn parse_session(path: &Path, history: &HashMap<String, String>) -> Result<Sessi
         .unwrap_or_else(|| "unknown".to_owned());
     let mut cwd = None;
     let mut branch = None;
-    let mut slug = None;
+    let mut custom_title = None;
+    let mut ai_title = None;
     let mut first_user = None;
 
-    for value in &head {
+    for value in head.iter().chain(tail_values(path)?.iter()) {
         if let Some(found) = value.get("sessionId").and_then(Value::as_str) {
             id = found.to_owned();
         }
@@ -61,29 +56,28 @@ fn parse_session(path: &Path, history: &HashMap<String, String>) -> Result<Sessi
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
         });
-        slug = slug.or_else(|| {
-            value
-                .get("slug")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        });
+        if let Some(title) = value.get("customTitle").and_then(Value::as_str) {
+            custom_title = Some(title.to_owned());
+        }
+        if let Some(title) = value.get("aiTitle").and_then(Value::as_str) {
+            ai_title = Some(title.to_owned());
+        }
         if value.get("type").and_then(Value::as_str) == Some("user")
             && !value
                 .get("isMeta")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             && let Some(text) = value.get("message").and_then(message_text)
-            && useful_user_text(&text)
+            && let Some(text) = prompt_text(&text)
         {
             first_user.get_or_insert(text);
         }
     }
 
     let cwd = cwd.context("session has no working directory")?;
-    let title = history
-        .get(&id)
-        .cloned()
-        .or(slug)
+    let title = custom_title
+        .or(ai_title)
+        .or_else(|| history.get(&id).cloned())
         .or_else(|| first_user.map(|text| clean_text(&text, 72)))
         .unwrap_or_else(|| "Untitled Claude session".to_owned());
     let project = cwd
@@ -134,10 +128,12 @@ fn load_history(path: &Path) -> HashMap<String, String> {
         let Some(display) = value.get("display").and_then(Value::as_str) else {
             continue;
         };
-        if useful_user_text(display) && !display.starts_with('/') {
+        if let Some(display) = prompt_text(display)
+            && !display.starts_with('/')
+        {
             history
                 .entry(id.to_owned())
-                .or_insert_with(|| clean_text(display, 72));
+                .or_insert_with(|| clean_text(&display, 72));
         }
     }
     history
@@ -193,5 +189,29 @@ mod tests {
         assert_eq!(session.title, "Build the thing");
         assert_eq!(load_preview(&path).unwrap(), "Implemented the parser.");
         assert_eq!(session.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn renamed_title_wins_over_history_and_slug() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.jsonl");
+        fs::write(&path,concat!(r#"{"type":"user","sessionId":"synthetic","cwd":"/synthetic","slug":"random-plan-name","message":{"role":"user","content":"Synthetic task"}}"#,"\n",r#"{"type":"ai-title","aiTitle":"Synthetic AI title"}"#,"\n",r#"{"type":"custom-title","customTitle":"Synthetic renamed title"}"#,"\n")).unwrap();
+        assert_eq!(
+            parse_session(
+                &path,
+                &HashMap::from([("synthetic".into(), "Synthetic history".into())])
+            )
+            .unwrap()
+            .title,
+            "Synthetic renamed title"
+        );
+    }
+
+    #[test]
+    fn history_titles_use_extracted_prompt_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.jsonl");
+        fs::write(&path, r#"{"sessionId":"synthetic","display":"<timestamp>synthetic</timestamp><user_query>Actual task</user_query>"}"#).unwrap();
+        assert_eq!(load_history(&path)["synthetic"], "Actual task");
     }
 }

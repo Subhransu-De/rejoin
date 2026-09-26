@@ -12,7 +12,7 @@ use crate::model::{Agent, Session, SessionStatus};
 
 use super::cache::SessionCache;
 use super::common::{
-    clean_text, first_json, head_values, message_text, modified_time, tail_values, useful_user_text,
+    clean_text, head_values, message_text, modified_time, prompt_text, tail_values,
 };
 use super::{jsonl_files, parallel_map, profile};
 
@@ -25,7 +25,7 @@ pub fn scan(home: &Path, cache: &SessionCache) -> Result<Vec<Session>> {
         (home.join("archived_sessions"), true),
     ] {
         let enumerate_started = Instant::now();
-        let files = jsonl_files(&root)?;
+        let files = jsonl_files(&root, cache)?;
         profile("codex files", enumerate_started);
         let parse_started = Instant::now();
         let found = parallel_map(files, |path| {
@@ -53,7 +53,12 @@ fn parse_session(
     titles: &HashMap<String, String>,
     archived: bool,
 ) -> Result<Option<Session>> {
-    let header: CodexHeader = first_json(path)?;
+    let head = head_values(path)?;
+    let header: CodexHeader = serde_json::from_value(
+        head.first()
+            .cloned()
+            .context("session metadata is missing")?,
+    )?;
     let meta = header.payload.as_deref().unwrap_or(&header);
     if meta
         .source
@@ -71,8 +76,7 @@ fn parse_session(
     let cwd = meta
         .cwd
         .clone()
-        .or_else(dirs::home_dir)
-        .context("session metadata has no working directory and home is unavailable")?;
+        .context("session metadata has no working directory")?;
     let branch = meta.git.as_ref().and_then(|git| git.branch.clone());
     let legacy_repository = meta
         .git
@@ -84,9 +88,7 @@ fn parse_session(
         .get(&id)
         .cloned()
         .or_else(|| {
-            head_values(path)
-                .ok()?
-                .iter()
+            head.iter()
                 .find_map(codex_user_message)
                 .map(|text| clean_text(&text, 72))
         })
@@ -153,14 +155,20 @@ fn codex_user_message(value: &Value) -> Option<String> {
         && value.get("role").and_then(Value::as_str) == Some("user")
     {
         let text = message_text(value)?;
-        return useful_user_text(&text).then_some(text);
+        return prompt_text(&text);
     }
     let payload = value.get("payload")?;
+    if value.get("type").and_then(Value::as_str) == Some("response_item")
+        && payload.get("type").and_then(Value::as_str) == Some("message")
+        && payload.get("role").and_then(Value::as_str) == Some("user")
+    {
+        return prompt_text(&message_text(payload)?);
+    }
     if value.get("type").and_then(Value::as_str) == Some("event_msg")
         && payload.get("type").and_then(Value::as_str) == Some("user_message")
     {
         let text = payload.get("message").and_then(Value::as_str)?;
-        return useful_user_text(text).then(|| text.to_owned());
+        return prompt_text(text);
     }
     None
 }
@@ -236,10 +244,10 @@ fn load_history_titles(path: &Path, titles: &mut HashMap<String, String>) {
         else {
             continue;
         };
-        if useful_user_text(text) {
+        if let Some(text) = prompt_text(text) {
             titles
                 .entry(id.to_owned())
-                .or_insert_with(|| clean_text(text, 72));
+                .or_insert_with(|| clean_text(&text, 72));
         }
     }
 }
@@ -331,5 +339,29 @@ mod tests {
                 "{name} subagent should not be listed"
             );
         }
+    }
+
+    #[test]
+    fn title_uses_response_item_user_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.jsonl");
+        fs::write(&path,concat!(r#"{"type":"session_meta","payload":{"id":"synthetic","cwd":"/synthetic"}}"#,"\n",r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<timestamp>synthetic</timestamp><user_query>Build synthetic parser</user_query>"}]}}"#,"\n")).unwrap();
+        assert_eq!(
+            parse_session(&path, &HashMap::new(), false)
+                .unwrap()
+                .unwrap()
+                .title,
+            "Build synthetic parser"
+        );
+    }
+
+    #[test]
+    fn history_titles_use_extracted_prompt_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.jsonl");
+        fs::write(&path, r#"{"session_id":"synthetic","text":"<timestamp>synthetic</timestamp><user_query>Actual task</user_query>"}"#).unwrap();
+        let mut titles = HashMap::new();
+        load_history_titles(&path, &mut titles);
+        assert_eq!(titles["synthetic"], "Actual task");
     }
 }

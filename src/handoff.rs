@@ -16,9 +16,11 @@ const MAX_ITEMS: usize = 30;
 #[derive(Default)]
 struct Evidence {
     task: Option<String>,
+    instructions: Vec<String>,
     progress: Vec<String>,
     decisions: Vec<String>,
     files: Vec<String>,
+    read_files: Vec<String>,
     commands: Vec<String>,
     remaining: Vec<String>,
 }
@@ -55,6 +57,8 @@ pub fn generate(session: &Session) -> Result<Handoff> {
     }
 
     deduplicate(&mut evidence.files);
+    deduplicate(&mut evidence.read_files);
+    trim_to_last(&mut evidence.read_files, MAX_ITEMS);
     deduplicate(&mut evidence.commands);
     deduplicate(&mut evidence.decisions);
     deduplicate(&mut evidence.remaining);
@@ -64,10 +68,10 @@ pub fn generate(session: &Session) -> Result<Handoff> {
     trim_to_last(&mut evidence.remaining, 8);
     trim_to_last(&mut evidence.progress, 3);
 
-    let markdown = render(session, &evidence);
+    let markdown = redact(&render(session, &evidence));
     Ok(Handoff {
         markdown,
-        suggested_name: format!("HANDOFF-{}.md", slugify(&session.title)),
+        suggested_name: format!("HANDOFF-{}.md", slugify(&redact_record(&session.title))),
     })
 }
 
@@ -120,19 +124,54 @@ fn consume_message(role: &str, message: &Value, evidence: &mut Evidence) {
 }
 
 fn consume_role_text(role: &str, text: &str, evidence: &mut Evidence) {
-    if role == "user" && evidence.task.is_none() && useful_task(text) {
-        evidence.task = Some(limit(text, MAX_TASK_CHARS));
+    if role == "user" {
+        if let Some(text) = crate::scanner::prompt_text(text) {
+            let text = limit(&redact_record(&text), MAX_TASK_CHARS);
+            if evidence.task.is_none() {
+                evidence.task = Some(text);
+            } else if evidence.task.as_ref() != Some(&text)
+                && evidence.instructions.last() != Some(&text)
+            {
+                evidence.instructions.push(text);
+                trim_to_last(&mut evidence.instructions, 3);
+            }
+        }
     } else if role == "assistant" {
         consume_assistant_text(text, evidence);
     }
 }
 
-pub fn save(handoff: &Handoff, cwd: &Path) -> Result<PathBuf> {
-    let directory = if cwd.is_dir() { cwd } else { Path::new(".") };
-    let desired = directory.join(&handoff.suggested_name);
-    let path = unique_path(desired);
-    std::fs::write(&path, &handoff.markdown)
-        .with_context(|| format!("could not write {}", path.display()))?;
+pub fn save(handoff: &Handoff, _cwd: &Path) -> Result<PathBuf> {
+    let directory = dirs::cache_dir()
+        .context("could not determine private handoff directory")?
+        .join("rejoin")
+        .join("handoffs");
+    std::fs::create_dir_all(&directory)?;
+    save_in(handoff, &directory)
+}
+
+fn save_in(handoff: &Handoff, directory: &Path) -> Result<PathBuf> {
+    use std::io::Write;
+    let safe_name = Path::new(&handoff.suggested_name)
+        .file_name()
+        .context("invalid handoff filename")?
+        .to_string_lossy();
+    let name = format!(
+        "{}-{}-{}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        std::process::id(),
+        safe_name
+    );
+    let path = directory.join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    file.write_all(redact(&handoff.markdown).as_bytes())?;
     Ok(path)
 }
 
@@ -148,16 +187,8 @@ fn consume_claude(value: &Value, evidence: &mut Evidence) {
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if role == "user"
-        && evidence.task.is_none()
-        && let Some(text) = text_content(message)
-        && useful_task(&text)
-    {
-        evidence.task = Some(limit(&text, MAX_TASK_CHARS));
-    } else if role == "assistant"
-        && let Some(text) = text_content(message)
-    {
-        consume_assistant_text(&text, evidence);
+    if let Some(text) = text_content(message) {
+        consume_role_text(role, &text, evidence);
     }
 
     if let Some(blocks) = message.get("content").and_then(Value::as_array) {
@@ -178,17 +209,15 @@ fn consume_claude(value: &Value, evidence: &mut Evidence) {
 fn consume_codex(value: &Value, evidence: &mut Evidence) {
     let outer_type = value.get("type").and_then(Value::as_str);
     if outer_type == Some("message") {
-        let role = value.get("role").and_then(Value::as_str);
-        if role == Some("user")
-            && evidence.task.is_none()
-            && let Some(text) = text_content(value)
-            && useful_task(&text)
-        {
-            evidence.task = Some(limit(&text, MAX_TASK_CHARS));
-        } else if role == Some("assistant")
-            && let Some(text) = text_content(value)
-        {
-            consume_assistant_text(&text, evidence);
+        if let Some(text) = text_content(value) {
+            consume_role_text(
+                value
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                &text,
+                evidence,
+            );
         }
         return;
     }
@@ -203,6 +232,7 @@ fn consume_codex(value: &Value, evidence: &mut Evidence) {
         let input = value
             .get("arguments")
             .or_else(|| value.get("input"))
+            .or_else(|| value.get("action"))
             .unwrap_or(&Value::Null);
         consume_encoded_tool(name, input, evidence);
         return;
@@ -211,14 +241,25 @@ fn consume_codex(value: &Value, evidence: &mut Evidence) {
         return;
     };
     let payload_type = payload.get("type").and_then(Value::as_str);
+    if outer_type == Some("response_item") && payload_type == Some("message") {
+        if let Some(text) = text_content(payload) {
+            consume_role_text(
+                payload
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                &text,
+                evidence,
+            );
+        }
+        return;
+    }
 
     if outer_type == Some("event_msg")
         && payload_type == Some("user_message")
-        && evidence.task.is_none()
         && let Some(text) = payload.get("message").and_then(Value::as_str)
-        && useful_task(text)
     {
-        evidence.task = Some(limit(text, MAX_TASK_CHARS));
+        consume_role_text("user", text, evidence);
     } else if outer_type == Some("event_msg") && payload_type == Some("agent_message") {
         if let Some(text) = payload.get("message").and_then(Value::as_str) {
             consume_assistant_text(text, evidence);
@@ -236,6 +277,7 @@ fn consume_codex(value: &Value, evidence: &mut Evidence) {
         let input = payload
             .get("arguments")
             .or_else(|| payload.get("input"))
+            .or_else(|| payload.get("action"))
             .unwrap_or(&Value::Null);
         consume_encoded_tool(name, input, evidence);
     }
@@ -253,11 +295,16 @@ fn consume_encoded_tool(name: &str, input: &Value, evidence: &mut Evidence) {
 }
 
 fn consume_assistant_text(text: &str, evidence: &mut Evidence) {
-    let clean = text.trim();
+    let sanitized = redact_record(text);
+    let clean = sanitized.trim();
     if clean.is_empty() {
         return;
     }
-    evidence.progress.push(limit(clean, MAX_PROGRESS_CHARS));
+    let item = limit(clean, MAX_PROGRESS_CHARS);
+    if evidence.progress.last() != Some(&item) {
+        evidence.progress.push(item);
+    }
+    trim_to_last(&mut evidence.progress, 3);
     for line in clean.lines().map(str::trim) {
         let lower = line.to_lowercase();
         if lower.contains("decision")
@@ -265,39 +312,63 @@ fn consume_assistant_text(text: &str, evidence: &mut Evidence) {
             || lower.starts_with("using ")
             || lower.contains("we'll use")
         {
-            evidence.decisions.push(strip_bullet(line));
+            evidence.decisions.push(limit(&strip_bullet(line), 800));
+            trim_to_last(&mut evidence.decisions, 8);
         }
         if lower.contains("remaining")
             || lower.contains("next step")
             || lower.starts_with("todo")
             || lower.starts_with("- [ ]")
         {
-            evidence.remaining.push(strip_bullet(line));
+            evidence.remaining.push(limit(&strip_bullet(line), 800));
+            trim_to_last(&mut evidence.remaining, 8);
         }
     }
 }
 
 fn consume_tool(name: &str, input: &Value, evidence: &mut Evidence) {
-    let lower = name.to_lowercase();
-    if (lower.contains("shell") || lower == "bash" || lower == "powershell")
+    let lower = name.rsplit('.').next().unwrap_or(name).to_lowercase();
+    if (lower.contains("shell")
+        || lower == "bash"
+        || lower == "powershell"
+        || lower == "exec"
+        || lower == "exec_command")
         && let Some(command) = input
             .get("command")
             .or_else(|| input.get("cmd"))
             .and_then(Value::as_str)
             .or_else(|| input.as_str())
     {
-        evidence.commands.push(limit(command, 800));
+        evidence.commands.push(limit(&redact_record(command), 800));
     }
 
+    if let Some(parts) = input.get("command").and_then(Value::as_array) {
+        let parts = parts.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+        let parts = if parts.len() >= 3 && matches!(parts[1], "-lc" | "-c") {
+            &parts[2..]
+        } else {
+            &parts[..]
+        };
+        if lower.contains("shell") || lower == "bash" || lower == "exec" {
+            evidence
+                .commands
+                .push(limit(&redact_record(&parts.join(" ")), 800));
+        }
+    }
+    trim_to_last(&mut evidence.commands, MAX_ITEMS);
     for key in ["file_path", "path", "workdir"] {
         if let Some(path) = input.get(key).and_then(Value::as_str)
             && (key != "workdir" || lower.contains("edit") || lower.contains("write"))
         {
-            evidence.files.push(path.to_owned());
+            if lower.contains("edit") || lower.contains("write") || lower.contains("patch") {
+                evidence.files.push(path.to_owned());
+            } else {
+                evidence.read_files.push(path.to_owned());
+            }
         }
     }
 
-    if lower.contains("patch")
+    if (lower.contains("patch") || lower == "exec")
         && let Some(patch) = input
             .as_str()
             .or_else(|| input.get("patch").and_then(Value::as_str))
@@ -316,6 +387,8 @@ fn consume_tool(name: &str, input: &Value, evidence: &mut Evidence) {
             }
         }
     }
+    trim_to_last(&mut evidence.files, MAX_ITEMS);
+    trim_to_last(&mut evidence.read_files, MAX_ITEMS);
 }
 
 fn render(session: &Session, evidence: &Evidence) -> String {
@@ -342,9 +415,11 @@ fn render(session: &Session, evidence: &Evidence) -> String {
          **Working directory:** `{cwd}`  \n\
          **Generated:** {generated}\n\n\
          ## Task\n\n{task}\n\n\
+         ## Recent instructions\n\n{instructions}\n\n\
          ## Current progress\n\n{progress}\n\n\
-         ## Decisions\n\n{decisions}\n\n\
-         ## Relevant files\n\n{files}\n\n\
+         ## Possible decisions (auto-detected)\n\n{decisions}\n\n\
+         ## Changed files\n\n{files}\n\n\
+         ## Read files\n\n{read_files}\n\n\
          ## Commands run\n\n{commands}\n\n\
          ## Remaining work\n\n{remaining}\n\n\
          ## Continuation note\n\n\
@@ -356,6 +431,8 @@ fn render(session: &Session, evidence: &Evidence) -> String {
         project = session.project,
         cwd = session.cwd.display(),
         generated = Utc::now().to_rfc3339(),
+        instructions = bullets(&evidence.instructions, "No later instructions recorded."),
+        read_files = code_bullets(&evidence.read_files, "No read paths detected."),
         decisions = bullets(&evidence.decisions, "No explicit decisions detected."),
         files = code_bullets(&evidence.files, "No relevant files detected."),
         commands = code_bullets(&evidence.commands, "No shell commands detected."),
@@ -384,15 +461,6 @@ fn text_content(message: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     (!text.trim().is_empty()).then_some(text)
-}
-
-fn useful_task(text: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty()
-        && !text.starts_with("<system-reminder>")
-        && !text.starts_with("<environment_context>")
-        && !text.starts_with("# AGENTS.md instructions")
-        && text != "Warmup"
 }
 
 fn bullets(items: &[String], empty: &str) -> String {
@@ -456,6 +524,7 @@ fn slugify(title: &str) -> String {
             }
         })
         .collect::<String>();
+    let slug = slug.chars().take(80).collect::<String>();
     let slug = slug
         .split('-')
         .filter(|part| !part.is_empty())
@@ -469,31 +538,52 @@ fn slugify(title: &str) -> String {
     }
 }
 
-fn unique_path(desired: PathBuf) -> PathBuf {
-    if !desired.exists() {
-        return desired;
+fn redact_record(text: &str) -> String {
+    if redact(text) != text.lines().collect::<Vec<_>>().join("\n") {
+        "[REDACTED: potentially sensitive content]".to_owned()
+    } else {
+        text.to_owned()
     }
-    let parent = desired.parent().unwrap_or(Path::new(""));
-    let stem = desired
-        .file_stem()
-        .map(|value| value.to_string_lossy())
-        .unwrap_or_default();
-    let extension = desired
-        .extension()
-        .map(|value| value.to_string_lossy())
-        .unwrap_or_default();
-    for suffix in 2..10_000 {
-        let file = if extension.is_empty() {
-            format!("{stem}-{suffix}")
-        } else {
-            format!("{stem}-{suffix}.{extension}")
-        };
-        let candidate = parent.join(file);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    desired
+}
+
+fn redact(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let lower = line.to_lowercase();
+            let assignment = line.match_indices(['=', ':']).any(|(index, _)| {
+                let prefix = line[..index].trim_end().trim_end_matches(['\'', '"']);
+                let name = prefix
+                    .rsplit(|character: char| {
+                        !character.is_alphanumeric() && !matches!(character, '_' | '-')
+                    })
+                    .next()
+                    .unwrap_or_default();
+                let name = name.to_ascii_lowercase();
+                ["key", "token", "secret", "password"]
+                    .iter()
+                    .any(|key| name.contains(key))
+            });
+            let sensitive = assignment
+                || lower.contains("authorization:")
+                || lower.contains("bearer ")
+                || ["sk-", "ghp_", "github_pat_", "xoxb-", "xoxp-", "akia"]
+                    .iter()
+                    .any(|prefix| lower.contains(prefix))
+                || line.split_whitespace().any(|word| {
+                    word.split_once("://").is_some_and(|(_, rest)| {
+                        rest.split('/')
+                            .next()
+                            .is_some_and(|authority| authority.contains('@'))
+                    })
+                });
+            if sensitive {
+                "[REDACTED: potentially sensitive content]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -515,5 +605,116 @@ mod tests {
             &mut evidence,
         );
         assert_eq!(evidence.files, ["src/main.rs", "src/ui.rs"]);
+    }
+
+    #[test]
+    fn modern_codex_handoff_keeps_messages_corrections_and_commands() {
+        let mut evidence = Evidence::default();
+        for (role, text) in [
+            ("user", "Synthetic initial task"),
+            ("assistant", "Synthetic progress"),
+            ("user", "Synthetic correction"),
+        ] {
+            consume_codex(
+                &serde_json::json!({"type":"response_item","payload":{"type":"message","role":role,"content":[{"type":"text","text":text}]}}),
+                &mut evidence,
+            );
+        }
+        consume_encoded_tool(
+            "exec_command",
+            &serde_json::json!({"cmd":"echo synthetic"}),
+            &mut evidence,
+        );
+        consume_encoded_tool(
+            "shell",
+            &serde_json::json!({"command":["bash","-lc","echo fixture"]}),
+            &mut evidence,
+        );
+        assert_eq!(evidence.task.as_deref(), Some("Synthetic initial task"));
+        assert_eq!(evidence.progress, ["Synthetic progress"]);
+        assert_eq!(evidence.instructions, ["Synthetic correction"]);
+        assert!(
+            evidence
+                .commands
+                .iter()
+                .any(|command| command.contains("echo synthetic"))
+        );
+        assert!(
+            evidence
+                .commands
+                .iter()
+                .any(|command| command.contains("echo fixture"))
+        );
+    }
+
+    #[test]
+    fn redacts_synthetic_credentials_in_all_text_sections() {
+        for text in [
+            "export API_KEY=synthetic-secret",
+            "curl -H \"Authorization: Bearer synthetic-secret\"",
+            "https://synthetic:synthetic-secret@example.invalid/path",
+            "ghp_synthetic-secret",
+            "password: synthetic-secret",
+            r#"{"api_key": "synthetic-secret"}"#,
+            "X-API-Key: synthetic-secret",
+            r#"{"host": "example.invalid", "api_key": "synthetic-secret"}"#,
+            "MODE=synthetic API_KEY=synthetic-secret",
+        ] {
+            assert!(!redact(text).contains("synthetic-secret"));
+        }
+        assert_eq!(redact("Run cargo check"), "Run cargo check");
+        assert_eq!(
+            redact_record("Synthetic progress\r\n"),
+            "Synthetic progress\r\n"
+        );
+    }
+
+    #[test]
+    fn saved_handoffs_are_exclusive_and_redacted() {
+        let directory = tempfile::tempdir().unwrap();
+        let handoff = Handoff {
+            markdown: "Synthetic task\nexport API_KEY=synthetic-secret".into(),
+            suggested_name: "synthetic.md".into(),
+        };
+        let path = save_in(&handoff, directory.path()).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("synthetic-secret")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn generated_filename_does_not_include_title_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript = directory.path().join("synthetic.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let session = Session {
+            id: "synthetic".into(),
+            agent: Agent::Codex,
+            project: "synthetic".into(),
+            repository: None,
+            branch: None,
+            cwd: directory.path().to_path_buf(),
+            title: "sk-synthetic-secret".into(),
+            status: crate::model::SessionStatus::Stale,
+            last_activity: chrono::DateTime::UNIX_EPOCH,
+            transcript,
+            preview: String::new(),
+            archived: false,
+            parse_error: None,
+            preview_loaded: true,
+        };
+        let handoff = generate(&session).unwrap();
+        assert!(!handoff.markdown.contains("synthetic-secret"));
+        assert!(!handoff.suggested_name.contains("synthetic-secret"));
     }
 }

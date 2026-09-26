@@ -1,18 +1,8 @@
-use std::io::{self, Write};
+use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result, bail};
 
 use crate::model::Agent;
-
-const STARTUP_FRAMES: [&str; 4] = ["·", "∙", "●", "∙"];
-const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(160);
-const STARTUP_ANIMATION_LIMIT: Duration = Duration::from_millis(1_200);
 
 #[derive(Clone, Debug)]
 pub enum LaunchKind {
@@ -23,6 +13,8 @@ pub enum LaunchKind {
 
 #[derive(Clone, Debug)]
 pub struct LaunchRequest {
+    #[cfg(windows)]
+    pub cursor_home: PathBuf,
     pub kind: LaunchKind,
     pub cwd: PathBuf,
 }
@@ -34,134 +26,110 @@ pub fn execute(request: &LaunchRequest) -> Result<ExitStatus> {
             request.cwd.display()
         );
     }
-
-    let (agent, mut command) = build_command(request);
-    command.current_dir(&request.cwd);
-
-    // Paint the first frame before CreateProcess/exec so feedback is immediate.
-    // The next operation is spawn: there is deliberately no startup sleep.
-    let indicator = StartupIndicator::start(agent);
-    let started = Instant::now();
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to start {}", agent.binary()))?;
-    if std::env::var_os("REJOIN_PROFILE").is_some() {
-        eprintln!(
-            "rejoin launch: spawned {} in {:.2} ms",
-            agent.binary(),
-            started.elapsed().as_secs_f64() * 1_000.0
-        );
+    let (agent, command) = build_command(request)?;
+    let mut command = command;
+    #[cfg(windows)]
+    if agent == Agent::Cursor
+        && let Some((distro, _)) = crate::scanner::wsl_path(&request.cursor_home)
+            .or_else(|| crate::scanner::wsl_path(&request.cwd))
+    {
+        let cwd = windows_path_for_wsl(&request.cwd, &distro)?;
+        let args = command
+            .get_args()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        command = Command::new("wsl.exe");
+        command
+            .args([
+                "--distribution",
+                &distro,
+                "--cd",
+                &cwd,
+                "--",
+                "cursor-agent",
+            ])
+            .args(args);
     }
-    let status = child
-        .wait()
-        .with_context(|| format!("failed while waiting for {}", agent.binary()))?;
-    indicator.stop();
-    Ok(status)
+    if command.get_program() != "wsl.exe" {
+        command = resolve_command(command);
+        command.current_dir(&request.cwd);
+    }
+    println!("Opening {}…", agent.label());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec()).with_context(|| format!("failed to start {}", agent.binary()))
+    }
+    #[cfg(windows)]
+    {
+        let _guard = ConsoleInterruptGuard::install()?;
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to start {}", agent.binary()))?;
+        child
+            .wait()
+            .with_context(|| format!("failed while waiting for {}", agent.binary()))
+    }
 }
 
-struct StartupIndicator {
-    running: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl StartupIndicator {
-    fn start(agent: Agent) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let worker_running = Arc::clone(&running);
-        draw_opening(agent, STARTUP_FRAMES[0], false);
-        let initial_cursor = console_cursor();
-        let worker = std::thread::spawn(move || {
-            let mut frame = 0;
-            let mut expected_cursor = initial_cursor;
-            let deadline = Instant::now() + STARTUP_ANIMATION_LIMIT;
-
-            while worker_running.load(Ordering::Acquire) && Instant::now() < deadline {
-                std::thread::sleep(STARTUP_FRAME_INTERVAL);
-                if !worker_running.load(Ordering::Acquire) || Instant::now() >= deadline {
-                    break;
+fn resolve_command(command: Command) -> Command {
+    #[cfg(windows)]
+    {
+        let program = command.get_program().to_string_lossy();
+        for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+            for extension in ["exe", "cmd", "bat", "ps1"] {
+                let path = directory.join(format!("{program}.{extension}"));
+                if path.is_file() {
+                    let mut resolved = if extension == "ps1" {
+                        let mut host = Command::new("powershell.exe");
+                        host.args(["-NoLogo", "-NoProfile", "-File"]).arg(path);
+                        host
+                    } else {
+                        Command::new(path)
+                    };
+                    resolved.args(command.get_args());
+                    return resolved;
                 }
-
-                // On Windows, inherited console output moves the cursor as soon
-                // as the agent starts drawing. Stop before touching its UI.
-                if let (Some(expected), Some(current)) = (expected_cursor, console_cursor())
-                    && current != expected
-                {
-                    break;
-                }
-
-                frame = (frame + 1) % STARTUP_FRAMES.len();
-                draw_opening(agent, STARTUP_FRAMES[frame], true);
-                expected_cursor = console_cursor();
             }
-        });
-        Self {
-            running,
-            worker: Some(worker),
         }
     }
-
-    fn stop(mut self) {
-        self.running.store(false, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-impl Drop for StartupIndicator {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn draw_opening(agent: Agent, pulse: &str, update: bool) {
-    let mut output = io::stdout().lock();
-    if update {
-        let _ = write!(
-            output,
-            "\x1b[1A\r\x1b[2K{pulse} opening {}\x1b[1B\r",
-            agent.label()
-        );
-    } else {
-        let _ = writeln!(output, "{pulse} opening {}", agent.label());
-    }
-    let _ = output.flush();
+    command
 }
 
 #[cfg(windows)]
-fn console_cursor() -> Option<(i16, i16)> {
-    use windows_sys::Win32::System::Console::{
-        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
-    };
-
-    // SAFETY: GetStdHandle does not dereference application-provided pointers and
-    // accepts the documented STD_OUTPUT_HANDLE selector.
-    let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-    if handle.is_null() {
-        return None;
+struct ConsoleInterruptGuard;
+#[cfg(windows)]
+unsafe extern "system" fn handle_interrupt(event: u32) -> i32 {
+    i32::from(
+        event == windows_sys::Win32::System::Console::CTRL_C_EVENT
+            || event == windows_sys::Win32::System::Console::CTRL_BREAK_EVENT,
+    )
+}
+#[cfg(windows)]
+impl ConsoleInterruptGuard {
+    fn install() -> Result<Self> {
+        // SAFETY: the callback has the required ABI and remains valid for the process lifetime.
+        if unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(handle_interrupt), 1)
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Self)
     }
-    let mut info = std::mem::MaybeUninit::<CONSOLE_SCREEN_BUFFER_INFO>::uninit();
-    // SAFETY: `handle` was returned by GetStdHandle and `info` points to valid,
-    // writable storage for one CONSOLE_SCREEN_BUFFER_INFO value.
-    if unsafe { GetConsoleScreenBufferInfo(handle, info.as_mut_ptr()) } == 0 {
-        return None;
+}
+#[cfg(windows)]
+impl Drop for ConsoleInterruptGuard {
+    fn drop(&mut self) {
+        // SAFETY: this removes the same process-local handler installed by this guard.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(handle_interrupt), 0);
+        }
     }
-    // SAFETY: a nonzero return from GetConsoleScreenBufferInfo guarantees that
-    // the structure referenced by `info` was initialized.
-    let cursor = unsafe { info.assume_init() }.dwCursorPosition;
-    Some((cursor.X, cursor.Y))
 }
 
-#[cfg(not(windows))]
-fn console_cursor() -> Option<(i16, i16)> {
-    None
-}
-
-fn build_command(request: &LaunchRequest) -> (Agent, Command) {
-    match &request.kind {
+fn build_command(request: &LaunchRequest) -> Result<(Agent, Command)> {
+    Ok(match &request.kind {
         LaunchKind::New { agent } => (*agent, Command::new(agent.binary())),
         LaunchKind::Resume { agent, session_id } => {
             let mut command = Command::new(agent.binary());
@@ -185,9 +153,29 @@ fn build_command(request: &LaunchRequest) -> (Agent, Command) {
             (*agent, command)
         }
         LaunchKind::Handoff { target, markdown } => {
+            let file = crate::handoff::save(
+                &crate::model::Handoff {
+                    markdown: markdown.clone(),
+                    suggested_name: "handoff.md".to_owned(),
+                },
+                &request.cwd,
+            )?;
+            let reference = file.display().to_string();
+            #[cfg(windows)]
+            let reference = if *target == Agent::Cursor {
+                if let Some((distro, _)) = crate::scanner::wsl_path(&request.cursor_home)
+                    .or_else(|| crate::scanner::wsl_path(&request.cwd))
+                {
+                    windows_path_for_wsl(&file, &distro)?
+                } else {
+                    reference
+                }
+            } else {
+                reference
+            };
             let prompt = format!(
-                "Continue this work from the agent-neutral handoff below. Verify the repository \
-                 state first, then carry on with the remaining work.\n\n{markdown}"
+                "Read the handoff at {} first. Verify the repository state, then continue the remaining work.",
+                reference
             );
             let mut command = Command::new(target.binary());
             match target {
@@ -203,13 +191,38 @@ fn build_command(request: &LaunchRequest) -> (Agent, Command) {
             }
             (*target, command)
         }
+    })
+}
+
+#[cfg(windows)]
+fn windows_path_for_wsl(path: &std::path::Path, distro: &str) -> Result<String> {
+    let path = std::path::absolute(path)?;
+    let text = path.to_string_lossy();
+    let text = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        text.trim_start_matches(r"\\?\").to_owned()
+    };
+    if let Some((found, linux)) = crate::scanner::wsl_path(std::path::Path::new(&text)) {
+        if found != distro {
+            bail!("workspace belongs to a different WSL distribution");
+        }
+        return Ok(linux);
     }
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Ok(format!(
+            "/mnt/{}/{}",
+            (bytes[0] as char).to_ascii_lowercase(),
+            text[3..].replace('\\', "/")
+        ));
+    }
+    bail!("path cannot be translated for WSL: {}", path.display())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn resume_arguments_match_each_agent_cli() {
@@ -222,13 +235,15 @@ mod tests {
         ];
         for (agent, expected) in cases {
             let request = LaunchRequest {
+                #[cfg(windows)]
+                cursor_home: PathBuf::new(),
                 kind: LaunchKind::Resume {
                     agent,
                     session_id: "session-id".to_owned(),
                 },
                 cwd: PathBuf::from("."),
             };
-            let (_, command) = build_command(&request);
+            let (_, command) = build_command(&request).unwrap();
             let actual = command
                 .get_args()
                 .map(|value| value.to_string_lossy().into_owned())
@@ -241,10 +256,12 @@ mod tests {
     fn new_session_starts_the_selected_agent_without_resume_arguments() {
         for agent in Agent::ALL {
             let request = LaunchRequest {
+                #[cfg(windows)]
+                cursor_home: PathBuf::new(),
                 kind: LaunchKind::New { agent },
                 cwd: PathBuf::from("."),
             };
-            let (actual_agent, command) = build_command(&request);
+            let (actual_agent, command) = build_command(&request).unwrap();
 
             assert_eq!(actual_agent, agent);
             assert_eq!(command.get_program(), agent.binary());
@@ -252,41 +269,47 @@ mod tests {
         }
 
         #[cfg(windows)]
-        assert_eq!(Agent::Cursor.binary(), "cursor-agent.cmd");
+        assert_eq!(Agent::Cursor.binary(), "cursor-agent");
     }
 
     #[test]
-    fn expanding_pulse_frames_are_fixed_width() {
-        assert_eq!(STARTUP_FRAMES, ["·", "∙", "●", "∙"]);
-        assert!(
-            STARTUP_FRAMES
-                .iter()
-                .all(|frame| frame.chars().count() == 1 && UnicodeWidthStr::width(*frame) == 1),
-            "every pulse frame must occupy one character cell"
-        );
-    }
-
-    #[test]
-    fn startup_indicator_does_not_delay_process_spawn() {
-        let started = Instant::now();
-        let indicator = StartupIndicator::start(Agent::Codex);
-        #[cfg(windows)]
-        let mut child = Command::new("cmd.exe")
-            .args(["/D", "/C", "exit", "0"])
-            .spawn()
+    #[cfg(windows)]
+    fn windows_batch_shim_accepts_a_short_file_prompt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.cmd");
+        std::fs::write(&path, "@echo off\r\nexit /b 23\r\n").unwrap();
+        let status = Command::new(path)
+            .arg("Read the handoff file first.")
+            .status()
             .unwrap();
-        #[cfg(not(windows))]
-        let mut child = Command::new("true").spawn().unwrap();
-        let spawn_elapsed = started.elapsed();
-        child.wait().unwrap();
-        indicator.stop();
-        eprintln!(
-            "indicator plus process spawn: {:.2} ms",
-            spawn_elapsed.as_secs_f64() * 1_000.0
+        assert_eq!(status.code(), Some(23));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn translates_drive_and_distribution_paths_for_wsl() {
+        assert_eq!(
+            windows_path_for_wsl(
+                std::path::Path::new(r"C:\synthetic\handoff.md"),
+                "SyntheticDistro"
+            )
+            .unwrap(),
+            "/mnt/c/synthetic/handoff.md"
+        );
+        assert_eq!(
+            windows_path_for_wsl(
+                std::path::Path::new(r"\\wsl.localhost\SyntheticDistro\home\synthetic"),
+                "SyntheticDistro"
+            )
+            .unwrap(),
+            "/home/synthetic"
         );
         assert!(
-            spawn_elapsed < Duration::from_millis(250),
-            "launch feedback delayed process creation by {spawn_elapsed:?}"
+            windows_path_for_wsl(
+                std::path::Path::new(r"\\wsl.localhost\OtherDistro\home\synthetic"),
+                "SyntheticDistro"
+            )
+            .is_err()
         );
     }
 }

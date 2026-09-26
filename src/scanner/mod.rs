@@ -2,6 +2,7 @@ mod cache;
 mod claude;
 mod codex;
 mod common;
+pub(crate) use common::prompt_text;
 mod cursor;
 mod opencode;
 mod pi;
@@ -78,7 +79,7 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
     let started = Instant::now();
     let mut result = ScanResult::default();
     let cache_started = Instant::now();
-    let cache = SessionCache::load();
+    let cache = SessionCache::load(options);
     profile("cache load", cache_started);
 
     let (scans, process_snapshot) = std::thread::scope(|scope| {
@@ -96,7 +97,7 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
         });
         let cursor = scope.spawn(|| {
             let stage = Instant::now();
-            let sessions = cursor::scan(&options.cursor_home, options.scope.as_deref());
+            let sessions = cursor::scan(&options.cursor_home, options.scope.as_deref(), &cache);
             profile("cursor", stage);
             sessions
         });
@@ -108,7 +109,46 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
         });
         let opencode = scope.spawn(|| {
             let stage = Instant::now();
-            let sessions = opencode::scan(&options.opencode_database);
+            let sessions = if options.opencode_database.is_dir() {
+                let mut sessions = Vec::new();
+                for entry in std::fs::read_dir(&options.opencode_database)? {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            cache.warn(format!("OpenCode: {error}"));
+                            continue;
+                        }
+                    };
+                    let path = entry.path();
+                    if path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("opencode") && name.ends_with(".db"))
+                    {
+                        match opencode::scan(&path) {
+                            Ok(found) => sessions.extend(found),
+                            Err(error) => {
+                                cache.warn(format!("OpenCode {}: {error:#}", path.display()))
+                            }
+                        }
+                    }
+                }
+                sessions.sort_by_cached_key(|session| {
+                    std::cmp::Reverse((
+                        session.last_activity,
+                        session
+                            .transcript
+                            .metadata()
+                            .and_then(|metadata| metadata.modified())
+                            .ok(),
+                    ))
+                });
+                let mut seen = HashSet::new();
+                sessions.retain(|session| seen.insert(session.id.clone()));
+                Ok(sessions)
+            } else {
+                opencode::scan(&options.opencode_database)
+            };
             profile("opencode", stage);
             sessions
         });
@@ -169,6 +209,18 @@ pub fn scan(options: &ScanOptions) -> ScanResult {
         }
     };
 
+    result.warnings.extend(cache.warnings());
+    result
+        .warnings
+        .extend(result.sessions.iter().filter_map(|session| {
+            session.parse_error.as_ref().map(|error| {
+                format!(
+                    "{} {}: {error}",
+                    session.agent.label(),
+                    session.transcript.display()
+                )
+            })
+        }));
     let cache_started = Instant::now();
     if let Err(error) = cache.save_if_dirty(&result.sessions) {
         result.warnings.push(format!("Cache: {error:#}"));
@@ -261,131 +313,102 @@ fn discover_repository(cwd: &Path) -> (Option<String>, Option<PathBuf>) {
 
 #[derive(Debug, Default)]
 struct ProcessSnapshot {
-    commands: Vec<String>,
-    live_workspaces: HashSet<(Agent, String)>,
+    commands: Vec<(Agent, Vec<String>)>,
 }
 
 fn scan_agent_processes() -> ProcessSnapshot {
-    let process_list = ProcessRefreshKind::nothing().without_tasks();
-    let mut system =
-        System::new_with_specifics(RefreshKind::nothing().with_processes(process_list));
-    let agent_pids = system
+    let mut system = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().without_tasks()),
+    );
+    let pids = system
         .processes()
         .iter()
         .filter_map(|(pid, process)| {
             let name = process.name().to_string_lossy().to_lowercase();
-            (name.contains("claude")
-                || name.contains("codex")
-                || name.contains("cursor")
-                || name.contains("opencode")
-                || name == "pi"
-                || name == "pi.exe"
-                || name.contains("wsl"))
+            [
+                "claude",
+                "codex",
+                "cursor-agent",
+                "pi",
+                "opencode",
+                "node",
+                "bun",
+                "wsl",
+            ]
+            .iter()
+            .any(|binary| name == *binary || name == format!("{binary}.exe"))
             .then_some(*pid)
         })
         .collect::<Vec<_>>();
-    if !agent_pids.is_empty() {
-        let details = ProcessRefreshKind::nothing()
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        false,
+        ProcessRefreshKind::nothing()
             .without_tasks()
-            .with_cwd(UpdateKind::OnlyIfNotSet)
-            .with_cmd(UpdateKind::OnlyIfNotSet);
-        system.refresh_processes_specifics(ProcessesToUpdate::Some(&agent_pids), false, details);
-    }
+            .with_cmd(UpdateKind::OnlyIfNotSet),
+    );
     let mut snapshot = ProcessSnapshot::default();
-
-    for process in system.processes().values() {
+    for pid in pids {
+        let Some(process) = system.process(pid) else {
+            continue;
+        };
         let name = process.name().to_string_lossy().to_lowercase();
-        let command = process
+        let args = process
             .cmd()
             .iter()
-            .map(|part| part.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let agent = if name.contains("claude") {
-            Some(Agent::Claude)
-        } else if name.contains("codex") {
-            Some(Agent::Codex)
-        } else if name.contains("cursor") || command.to_lowercase().contains("cursor-agent") {
-            Some(Agent::Cursor)
-        } else if name == "pi" || name == "pi.exe" {
-            Some(Agent::Pi)
-        } else if name.contains("opencode") {
-            Some(Agent::OpenCode)
-        } else {
-            None
-        };
-
-        if let Some(agent) = agent {
-            if std::env::var_os("REJOIN_PROFILE").is_some() {
-                eprintln!(
-                    "rejoin profile: process        {:<22} cwd={}",
-                    name,
-                    process
-                        .cwd()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "<unavailable>".to_owned())
-                );
-            }
-            snapshot.commands.push(command);
-            if let Some(cwd) = process.cwd() {
-                snapshot
-                    .live_workspaces
-                    .insert((agent, normalize_path(cwd)));
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for agent in Agent::ALL {
+            if command_matches_agent(&name, &args, agent) {
+                snapshot.commands.push((agent, args.clone()));
             }
         }
     }
     snapshot
 }
 
-fn apply_process_status(sessions: &mut [Session], snapshot: &ProcessSnapshot) {
-    let exact_ids = sessions
-        .iter()
-        .filter(|session| {
-            snapshot
-                .commands
-                .iter()
-                .any(|command| command.contains(&session.id))
-        })
-        .map(|session| session.id.clone())
-        .collect::<HashSet<_>>();
-
-    let mut normalized_cwds = HashMap::<PathBuf, String>::new();
-    let session_workspaces = sessions
-        .iter()
-        .map(|session| {
-            let normalized = normalized_cwds
-                .entry(session.cwd.clone())
-                .or_insert_with(|| normalize_path(&session.cwd));
-            (session.agent, normalized.clone())
-        })
-        .collect::<Vec<_>>();
-
-    let mut newest_by_workspace: HashMap<(Agent, String), usize> = HashMap::new();
-    for (index, (session, key)) in sessions.iter().zip(session_workspaces).enumerate() {
-        if snapshot.live_workspaces.contains(&key) {
-            newest_by_workspace
-                .entry(key)
-                .and_modify(|current| {
-                    if sessions[*current].last_activity < session.last_activity {
-                        *current = index;
-                    }
-                })
-                .or_insert(index);
-        }
+fn command_matches_agent(name: &str, args: &[String], agent: Agent) -> bool {
+    let binary = agent.binary();
+    let matches_binary = |arg: &String| {
+        let normalized = arg.replace('\\', "/");
+        let base = normalized.rsplit('/').next().unwrap_or_default();
+        base == binary
+            || base == format!("{binary}.js")
+            || base == format!("{binary}.cmd")
+            || (agent == Agent::Claude && normalized.contains("/@anthropic-ai/claude-code/"))
+            || (agent == Agent::Pi && normalized.contains("/pi-coding-agent/"))
+    };
+    if matches!(name, "wsl" | "wsl.exe") {
+        return args
+            .iter()
+            .position(|arg| arg == "--")
+            .and_then(|index| args.get(index + 1))
+            .is_some_and(matches_binary);
     }
-    let inferred_active: HashSet<usize> = newest_by_workspace.into_values().collect();
-    let now = chrono::Utc::now();
+    name == binary || name == format!("{binary}.exe") || args.iter().take(3).any(matches_binary)
+}
 
-    for (index, session) in sessions.iter_mut().enumerate() {
-        if session.parse_error.is_some() {
-            session.status = SessionStatus::Error;
-        } else if exact_ids.contains(&session.id) || inferred_active.contains(&index) {
-            session.status = SessionStatus::Active;
+fn apply_process_status(sessions: &mut [Session], snapshot: &ProcessSnapshot) {
+    let now = chrono::Utc::now();
+    for session in sessions {
+        session.status = if session.parse_error.is_some() {
+            SessionStatus::Error
+        } else if !session.id.is_empty()
+            && snapshot.commands.iter().any(|(agent, args)| {
+                *agent == session.agent
+                    && args.iter().any(|arg| {
+                        arg == &session.id
+                            || (session.agent == Agent::Pi
+                                && arg == &session.transcript.to_string_lossy())
+                    })
+            })
+        {
+            SessionStatus::Active
         } else if now - session.last_activity <= Duration::days(1) {
-            session.status = SessionStatus::Idle;
+            SessionStatus::Idle
         } else {
-            session.status = SessionStatus::Stale;
-        }
+            SessionStatus::Stale
+        };
     }
 }
 
@@ -403,11 +426,21 @@ fn retain_scope(sessions: &mut Vec<Session>, scope: &Path) {
 
 fn normalize_path(path: &Path) -> String {
     let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    normalized
-        .to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .trim_end_matches(['/', '\\'])
-        .to_lowercase()
+    let text = normalized.to_string_lossy();
+    #[cfg(windows)]
+    {
+        text.trim_start_matches(r"\\?\")
+            .trim_end_matches(['/', '\\'])
+            .to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        if text == "/" {
+            text.into_owned()
+        } else {
+            text.trim_end_matches('/').to_owned()
+        }
+    }
 }
 
 pub(crate) fn opencode_text_history(
@@ -457,23 +490,11 @@ fn discover_opencode_database(home: &Path) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local").join("share"));
     let directory = data_home.join("opencode");
-    let preferred = directory.join("opencode.db");
-    std::fs::read_dir(&directory)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name == "opencode.db"
-                        || (name.starts_with("opencode-") && name.ends_with(".db"))
-                })
-        })
-        .max_by_key(|path| path.metadata().and_then(|meta| meta.modified()).ok())
-        .unwrap_or(preferred)
+    if directory.is_dir() {
+        directory
+    } else {
+        directory.join("opencode.db")
+    }
 }
 
 fn discover_cursor_home(home: &Path) -> Option<PathBuf> {
@@ -482,6 +503,13 @@ fn discover_cursor_home(home: &Path) -> Option<PathBuf> {
         return Some(native);
     }
     if let Some(wrapper_home) = cursor_home_from_wrapper() {
+        #[cfg(windows)]
+        if wsl_path(&wrapper_home)
+            .is_some_and(|(distro, _)| running_wsl_distros().contains(&distro))
+        {
+            return Some(wrapper_home);
+        }
+        #[cfg(not(windows))]
         return Some(wrapper_home);
     }
     discover_wsl_cursor_home()
@@ -529,35 +557,67 @@ fn discover_wsl_cursor_home() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+fn running_wsl_distros() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("wsl.exe")
+        .args(["--list", "--running", "--quiet"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = if output.stdout.contains(&0) {
+        String::from_utf16_lossy(
+            &output
+                .stdout
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    text.lines()
+        .map(|line| line.trim().trim_start_matches('\u{feff}').to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+#[cfg(windows)]
+pub(crate) fn wsl_path(path: &Path) -> Option<(String, String)> {
+    let text = path.to_string_lossy().replace('/', r"\");
+    let text = text
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or(text);
+    let rest = text
+        .strip_prefix(r"\\wsl.localhost\")
+        .or_else(|| text.strip_prefix(r"\\wsl$\"))?;
+    let (distro, path) = rest.split_once('\\')?;
+    Some((distro.to_owned(), format!("/{}", path.replace('\\', "/"))))
+}
+
+#[cfg(windows)]
 fn discover_wsl_cursor_home() -> Option<PathBuf> {
-    for share in [r"\\wsl$\", r"\\wsl.localhost\"] {
-        for distro in std::fs::read_dir(share)
-            .ok()?
-            .filter_map(|entry| entry.ok())
-        {
-            let home = distro.path().join("home");
-            for user in std::fs::read_dir(home)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.ok())
-            {
-                let candidate = user.path().join(".cursor");
-                if candidate.join("chats").exists() {
-                    return Some(candidate);
-                }
+    for distro in running_wsl_distros() {
+        let home = PathBuf::from(format!(r"\\wsl.localhost\{distro}\home"));
+        for user in std::fs::read_dir(home).ok().into_iter().flatten().flatten() {
+            let candidate = user.path().join(".cursor");
+            if candidate.join("chats").is_dir() {
+                return Some(candidate);
             }
         }
     }
     None
 }
 
-pub(crate) fn jsonl_files(root: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn jsonl_files(root: &Path, cache: &SessionCache) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if !root.exists() {
         return Ok(files);
     }
-    visit(root, &mut files)?;
+    visit(root, &mut files, cache);
     Ok(files)
 }
 
@@ -602,19 +662,33 @@ where
     results.into_iter().map(|(_, value)| value).collect()
 }
 
-fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(directory)
-        .with_context(|| format!("could not read {}", directory.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            if path.file_name().is_some_and(|name| name == "subagents") {
+fn visit(directory: &Path, files: &mut Vec<PathBuf>, cache: &SessionCache) {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            cache.warn(format!("{}: {error}", directory.display()));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                cache.warn(error.to_string());
                 continue;
             }
-            visit(&path, files)?;
-        } else if file_type.is_file()
+        };
+        let path = entry.path();
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                cache.warn(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        if kind.is_dir() && !path.file_name().is_some_and(|name| name == "subagents") {
+            visit(&path, files, cache);
+        } else if kind.is_file()
             && path
                 .extension()
                 .is_some_and(|extension| extension == "jsonl")
@@ -622,7 +696,6 @@ fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             files.push(path);
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -630,10 +703,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detects_wsl_agent_after_launch_options() {
+        let args = [
+            "wsl.exe",
+            "--distribution",
+            "SyntheticDistro",
+            "--cd",
+            "/synthetic",
+            "--",
+            "cursor-agent",
+            "--resume",
+            "synthetic-id",
+        ]
+        .map(str::to_owned);
+        assert!(command_matches_agent("wsl.exe", &args, Agent::Cursor));
+        assert!(!command_matches_agent("wsl.exe", &args, Agent::Codex));
+        let unrelated = ["wsl.exe", "--", "echo", "cursor-agent"].map(str::to_owned);
+        assert!(!command_matches_agent("wsl.exe", &unrelated, Agent::Cursor));
+    }
+
+    #[test]
+    fn malformed_sessions_outside_scope_are_warnings() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions = directory.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        std::fs::write(sessions.join("synthetic.jsonl"), "{").unwrap();
+        let result = scan(&ScanOptions {
+            claude_home: directory.path().join("claude"),
+            codex_home: directory.path().join("codex"),
+            cursor_home: directory.path().join("cursor"),
+            pi_sessions: sessions,
+            opencode_database: directory.path().join("opencode.db"),
+            scope: Some(directory.path().join("unrelated-project")),
+        });
+        assert!(result.sessions.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("synthetic.jsonl"))
+        );
+    }
+
+    #[test]
+    fn duplicate_opencode_sessions_prefer_latest_activity() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, timestamp) in [("opencode.db", 5), ("opencode-backup.db", 1)] {
+            let connection = rusqlite::Connection::open(directory.path().join(name)).unwrap();
+            connection.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_updated INTEGER);").unwrap();
+            connection
+                .execute(
+                    "INSERT INTO session VALUES ('synthetic', '/synthetic', 'Synthetic task', ?1)",
+                    [timestamp],
+                )
+                .unwrap();
+        }
+        let result = scan(&ScanOptions {
+            claude_home: directory.path().join("claude"),
+            codex_home: directory.path().join("codex"),
+            cursor_home: directory.path().join("cursor"),
+            pi_sessions: directory.path().join("pi"),
+            opencode_database: directory.path().to_path_buf(),
+            scope: None,
+        });
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(
+            result.sessions[0].transcript,
+            directory.path().join("opencode.db")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn normalizes_windows_extended_prefix_and_case() {
         assert_eq!(
             normalize_path(Path::new(r"\\?\X:\Fixture\Project\")),
             normalize_path(Path::new(r"x:\fixture\project"))
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn unix_scope_preserves_case() {
+        assert_ne!(
+            normalize_path(Path::new("/synthetic/Foo")),
+            normalize_path(Path::new("/synthetic/foo"))
         );
     }
 }

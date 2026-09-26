@@ -8,13 +8,13 @@ use crate::model::{Agent, Session, SessionStatus};
 
 use super::cache::SessionCache;
 use super::common::{
-    clean_text, head_values, message_text, modified_time, tail_values, useful_user_text,
+    clean_text, head_values, message_text, modified_time, prompt_text, tail_values,
 };
 use super::{jsonl_files, parallel_map, profile};
 
 pub fn scan(home: &Path, cache: &SessionCache) -> Result<Vec<Session>> {
     let enumerate_started = Instant::now();
-    let files = jsonl_files(home)?;
+    let files = jsonl_files(home, cache)?;
     profile("pi files", enumerate_started);
     let parse_started = Instant::now();
     let sessions = parallel_map(files, |path| match cache.get(&path) {
@@ -44,8 +44,11 @@ fn parse_session(path: &Path) -> Result<Session> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .context("Pi working directory is missing")?;
+    let tail = tail_values(path)?;
     let title = head
         .iter()
+        .chain(tail.iter())
+        .rev()
         .find(|value| value.get("type").and_then(Value::as_str) == Some("session_info"))
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str)
@@ -57,7 +60,7 @@ fn parse_session(path: &Path) -> Result<Session> {
                     value.pointer("/message/role").and_then(Value::as_str) == Some("user")
                 })
                 .filter_map(|value| value.get("message").and_then(message_text))
-                .find(|text| useful_user_text(text))
+                .find_map(|text| prompt_text(&text))
         })
         .map(|text| clean_text(&text, 72))
         .unwrap_or_else(|| "Untitled Pi session".to_owned());
@@ -116,5 +119,28 @@ fn error_session(path: PathBuf, error: anyhow::Error) -> Session {
         archived: false,
         parse_error: Some(format!("{error:#}")),
         preview_loaded: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn uses_latest_recorded_session_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","id":"synthetic","cwd":"/synthetic"}"#,
+                "\n",
+                r#"{"type":"session_info","name":"Old synthetic name"}"#,
+                "\n",
+                r#"{"type":"session_info","name":"New synthetic name"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(parse_session(&path).unwrap().title, "New synthetic name");
     }
 }

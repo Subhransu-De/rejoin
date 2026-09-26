@@ -1,5 +1,8 @@
+use ratatui::{layout::Rect, widgets::TableState};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -15,6 +18,7 @@ pub enum Mode {
     Search,
     Filter,
     Help,
+    Warnings,
     Handoff,
     ConfirmLaunch,
 }
@@ -47,8 +51,26 @@ impl Toast {
     }
 }
 
+#[derive(Default)]
+pub struct VisibleCache {
+    query: String,
+    filters: Filters,
+    archived: bool,
+    indices: [Vec<usize>; 5],
+    valid: bool,
+}
+
 pub struct App {
     pub sessions: Vec<Session>,
+    pub table_states: [TableState; 5],
+    pub panel_areas: [Rect; 5],
+    pub help_scroll: u16,
+    pub show_archived: bool,
+    pub visible_cache: RefCell<VisibleCache>,
+    pub last_clock_refresh: Instant,
+    pub scan_task: Option<Receiver<scanner::ScanResult>>,
+    pub handoff_task: Option<Receiver<Result<Handoff, String>>>,
+    pub pending_mode: Mode,
     pub warnings: Vec<String>,
     pub scan_options: ScanOptions,
     pub active_agent: Agent,
@@ -60,6 +82,7 @@ pub struct App {
     pub filter_field: usize,
     pub mode: Mode,
     pub handoff: Option<Handoff>,
+    pub handoff_session: Option<Session>,
     pub handoff_scroll: u16,
     pub launch_target: Option<Agent>,
     pub toast: Option<Toast>,
@@ -67,10 +90,18 @@ pub struct App {
 
 impl App {
     pub fn load(scan_options: ScanOptions) -> Self {
-        let scan = scanner::scan(&scan_options);
         let mut app = Self {
-            sessions: scan.sessions,
-            warnings: scan.warnings,
+            sessions: Vec::new(),
+            warnings: Vec::new(),
+            table_states: std::array::from_fn(|_| TableState::default()),
+            panel_areas: [Rect::default(); 5],
+            help_scroll: 0,
+            show_archived: false,
+            visible_cache: RefCell::default(),
+            last_clock_refresh: Instant::now(),
+            scan_task: None,
+            handoff_task: None,
+            pending_mode: Mode::Normal,
             scan_options,
             active_agent: Agent::Codex,
             panel_selections: [0; 5],
@@ -81,11 +112,12 @@ impl App {
             filter_field: 0,
             mode: Mode::Normal,
             handoff: None,
+            handoff_session: None,
             handoff_scroll: 0,
             launch_target: None,
             toast: None,
         };
-        app.hydrate_selected_preview();
+        app.refresh();
         app
     }
 
@@ -95,21 +127,39 @@ impl App {
 
     pub fn visible_indices_for(&self, agent: Agent) -> Vec<usize> {
         let query = self.search.to_lowercase();
-        let mut indices = self
-            .sessions
+        let mut cache = self.visible_cache.borrow_mut();
+        if !cache.valid
+            || cache.query != query
+            || cache.filters != self.filters
+            || cache.archived != self.show_archived
+        {
+            cache.indices = std::array::from_fn(|panel| {
+                let mut indices = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, session)| {
+                        session.agent == Agent::ALL[panel]
+                            && (self.show_archived || !session.archived)
+                            && self.filters.matches(session)
+                            && (query.is_empty() || session.search_text().contains(&query))
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                indices
+                    .sort_by(|a, b| self.compare_sessions(&self.sessions[*a], &self.sessions[*b]));
+                indices
+            });
+            cache.query = query;
+            cache.filters = self.filters.clone();
+            cache.archived = self.show_archived;
+            cache.valid = true;
+        }
+        cache.indices[Agent::ALL
             .iter()
-            .enumerate()
-            .filter(|(_, session)| {
-                session.agent == agent
-                    && self.filters.matches(session)
-                    && (query.is_empty() || session.search_text().contains(&query))
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        indices.sort_by(|left, right| {
-            self.compare_sessions(&self.sessions[*left], &self.sessions[*right])
-        });
-        indices
+            .position(|candidate| *candidate == agent)
+            .unwrap_or(0)]
+        .clone()
     }
 
     pub fn selection_for(&self, agent: Agent) -> usize {
@@ -138,37 +188,120 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        let scan = scanner::scan(&self.scan_options);
-        self.sessions = scan.sessions;
-        self.warnings = scan.warnings;
-        self.clamp_selection();
-        self.hydrate_selected_preview();
-        self.toast = Some(Toast::new(
-            format!("Refreshed {} sessions", self.sessions.len()),
-            false,
-        ));
+        if self.scan_task.is_some() {
+            return;
+        }
+        let options = self.scan_options.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.scan_task = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(scanner::scan(&options));
+        });
     }
 
-    pub fn tick(&mut self) {
-        if self.toast.as_ref().is_some_and(Toast::expired) {
-            self.toast = None;
+    pub fn tick(&mut self) -> bool {
+        let mut changed = false;
+        if self.last_clock_refresh.elapsed() >= Duration::from_secs(60) {
+            self.last_clock_refresh = Instant::now();
+            self.visible_cache.borrow_mut().valid = false;
+            self.clamp_selection();
+            self.hydrate_selected_preview();
+            changed = true;
         }
+        if let Some(result) = self
+            .scan_task
+            .as_ref()
+            .and_then(|task| match task.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(scanner::ScanResult {
+                    sessions: Vec::new(),
+                    warnings: vec!["Session scan failed".into()],
+                }),
+                Err(mpsc::TryRecvError::Empty) => None,
+            })
+        {
+            let first_load = self.sessions.is_empty();
+            self.sessions = result.sessions;
+            self.warnings = result.warnings;
+            self.scan_task = None;
+            self.visible_cache.borrow_mut().valid = false;
+            if first_load
+                && let Some(session) = self.sessions.iter().find(|session| !session.archived)
+            {
+                self.active_agent = session.agent;
+            }
+            self.clamp_selection();
+            self.hydrate_selected_preview();
+            changed = true;
+        }
+        if let Some(result) = self
+            .handoff_task
+            .as_ref()
+            .and_then(|task| match task.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Handoff generation failed".into()))
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+            })
+        {
+            self.handoff_task = None;
+            if self.mode == Mode::Handoff {
+                match result {
+                    Ok(handoff) => {
+                        self.handoff = Some(handoff);
+                        self.mode = self.pending_mode;
+                    }
+                    Err(error) => {
+                        self.toast = Some(Toast::new(error, true));
+                        self.mode = Mode::Normal;
+                    }
+                }
+            }
+            changed = true;
+        }
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| !toast.is_error && toast.expired())
+        {
+            self.toast = None;
+            changed = true;
+        }
+        changed
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return AppAction::None;
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return AppAction::Quit;
+        }
+        if self.toast.as_ref().is_some_and(|toast| toast.is_error) {
+            self.toast = None;
+        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Search => self.handle_search(key),
             Mode::Filter => self.handle_filter(key),
-            Mode::Help => {
+            Mode::Help | Mode::Warnings => {
                 if matches!(
                     key.code,
                     KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
                 ) {
                     self.mode = Mode::Normal;
+                }
+                match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.help_scroll = self.help_scroll.saturating_add(1)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1)
+                    }
+                    KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+                    KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                    _ => {}
                 }
                 AppAction::None
             }
@@ -192,15 +325,37 @@ impl App {
             }
         }
         match key.code {
+            KeyCode::Tab => {
+                self.cycle_panel(true);
+                AppAction::None
+            }
+            KeyCode::BackTab => {
+                self.cycle_panel(false);
+                AppAction::None
+            }
+            KeyCode::Char(character @ '1'..='5') => {
+                self.focus_agent(Agent::ALL[character as usize - '1' as usize]);
+                AppAction::None
+            }
+            KeyCode::Char('a') => {
+                self.show_archived = !self.show_archived;
+                self.selected = 0;
+                self.hydrate_selected_preview();
+                AppAction::None
+            }
+            KeyCode::Char('!') => {
+                self.help_scroll = 0;
+                self.mode = Mode::Warnings;
+                AppAction::None
+            }
             KeyCode::Char('q') => AppAction::Quit,
             KeyCode::Esc => {
                 if !self.search.is_empty() || !self.filters.is_empty() {
                     self.search.clear();
                     self.filters = Filters::default();
                     self.selected = 0;
-                } else {
-                    return AppAction::Quit;
                 }
+                self.hydrate_selected_preview();
                 AppAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -246,6 +401,7 @@ impl App {
                 AppAction::None
             }
             KeyCode::Char('?') => {
+                self.help_scroll = 0;
                 self.mode = Mode::Help;
                 AppAction::None
             }
@@ -259,6 +415,7 @@ impl App {
                 self.search.clear();
                 self.mode = Mode::Normal;
                 self.selected = 0;
+                self.hydrate_selected_preview();
             }
             KeyCode::Enter => self.mode = Mode::Normal,
             KeyCode::Backspace => {
@@ -339,7 +496,7 @@ impl App {
             KeyCode::PageUp => self.handoff_scroll = self.handoff_scroll.saturating_sub(12),
             KeyCode::Char('c') => self.copy_handoff(),
             KeyCode::Char('w') => self.save_handoff(),
-            KeyCode::Char('x') => {
+            KeyCode::Char('x') if self.handoff.is_some() => {
                 self.ensure_launch_target();
                 self.mode = Mode::ConfirmLaunch;
             }
@@ -363,7 +520,7 @@ impl App {
                 AppAction::None
             }
             KeyCode::Enter => {
-                let Some(session) = self.selected_session() else {
+                let Some(session) = self.handoff_session.as_ref() else {
                     return AppAction::None;
                 };
                 let Some(handoff) = &self.handoff else {
@@ -373,6 +530,8 @@ impl App {
                     return AppAction::None;
                 };
                 AppAction::Launch(LaunchRequest {
+                    #[cfg(windows)]
+                    cursor_home: self.scan_options.cursor_home.clone(),
                     kind: LaunchKind::Handoff {
                         target,
                         markdown: handoff.markdown.clone(),
@@ -389,9 +548,15 @@ impl App {
             return AppAction::None;
         };
         AppAction::Launch(LaunchRequest {
+            #[cfg(windows)]
+            cursor_home: self.scan_options.cursor_home.clone(),
             kind: LaunchKind::Resume {
                 agent: session.agent,
-                session_id: session.id.clone(),
+                session_id: if session.agent == Agent::Pi {
+                    session.transcript.to_string_lossy().into_owned()
+                } else {
+                    session.id.clone()
+                },
             },
             cwd: session.cwd.clone(),
         })
@@ -406,6 +571,8 @@ impl App {
 
     fn start_new_session(&self) -> AppAction {
         AppAction::Launch(LaunchRequest {
+            #[cfg(windows)]
+            cursor_home: self.scan_options.cursor_home.clone(),
             kind: LaunchKind::New {
                 agent: self.active_agent,
             },
@@ -418,27 +585,28 @@ impl App {
     }
 
     fn open_handoff(&mut self, next_mode: Mode) {
-        let Some(session) = self.selected_session() else {
+        if self.handoff_task.is_some() {
+            return;
+        }
+        let Some(session) = self.selected_session().cloned() else {
             self.toast = Some(Toast::new("No session selected", true));
             return;
         };
-        let source = session.agent;
-        let generated = handoff::generate(session);
-        match generated {
-            Ok(handoff) => {
-                self.handoff = Some(handoff);
-                self.handoff_scroll = 0;
-                self.launch_target = Agent::ALL.into_iter().find(|agent| *agent != source);
-                self.mode = next_mode;
-            }
-            Err(error) => {
-                self.toast = Some(Toast::new(format!("{error:#}"), true));
-            }
-        }
+        self.handoff_session = Some(session.clone());
+        self.handoff = None;
+        self.handoff_scroll = 0;
+        self.launch_target = Agent::ALL.into_iter().find(|agent| *agent != session.agent);
+        self.pending_mode = next_mode;
+        self.mode = Mode::Handoff;
+        let (sender, receiver) = mpsc::channel();
+        self.handoff_task = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(handoff::generate(&session).map_err(|error| format!("{error:#}")));
+        });
     }
 
     fn ensure_launch_target(&mut self) {
-        let Some(source) = self.selected_session().map(|session| session.agent) else {
+        let Some(source) = self.handoff_session.as_ref().map(|session| session.agent) else {
             return;
         };
         if self.launch_target.is_none() || self.launch_target == Some(source) {
@@ -447,7 +615,7 @@ impl App {
     }
 
     fn cycle_launch_target(&mut self, forward: bool) {
-        let Some(source) = self.selected_session().map(|session| session.agent) else {
+        let Some(source) = self.handoff_session.as_ref().map(|session| session.agent) else {
             return;
         };
         let candidates = Agent::ALL
@@ -479,7 +647,7 @@ impl App {
     }
 
     fn save_handoff(&mut self) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.handoff_session.as_ref() else {
             return;
         };
         let Some(handoff) = &self.handoff else {
@@ -501,37 +669,77 @@ impl App {
         }
     }
 
+    fn cycle_panel(&mut self, forward: bool) {
+        let current = Agent::ALL
+            .iter()
+            .position(|agent| *agent == self.active_agent)
+            .unwrap_or(0);
+        self.focus_agent(Agent::ALL[(current + if forward { 1 } else { 4 }) % 5]);
+    }
+
+    fn focus_agent(&mut self, agent: Agent) {
+        let current = Agent::ALL
+            .iter()
+            .position(|candidate| *candidate == self.active_agent)
+            .unwrap_or(0);
+        self.panel_selections[current] = self.selected;
+        self.active_agent = agent;
+        let next = Agent::ALL
+            .iter()
+            .position(|candidate| *candidate == agent)
+            .unwrap_or(0);
+        self.selected = self.panel_selections[next];
+        self.clamp_selection();
+        self.hydrate_selected_preview();
+    }
+
     fn switch_agent(&mut self, direction: KeyCode) {
         let current = Agent::ALL
             .iter()
             .position(|agent| *agent == self.active_agent)
             .unwrap_or(0);
-        self.panel_selections[current] = self.selected;
-        // Wide layout positions:
-        // Codex  Claude  Cursor
-        // Pi     OpenCode
-        let next = match (current, direction) {
-            (0, KeyCode::Left) => 2,
-            (1, KeyCode::Left) => 0,
-            (2, KeyCode::Left) => 1,
-            (3, KeyCode::Left) => 4,
-            (4, KeyCode::Left) => 3,
-            (0, KeyCode::Right) => 1,
-            (1, KeyCode::Right) => 2,
-            (2, KeyCode::Right) => 0,
-            (3, KeyCode::Right) => 4,
-            (4, KeyCode::Right) => 3,
-            (0, KeyCode::Up | KeyCode::Down) => 3,
-            (1, KeyCode::Up | KeyCode::Down) => 4,
-            (2, KeyCode::Up | KeyCode::Down) => 4,
-            (3, KeyCode::Up | KeyCode::Down) => 0,
-            (4, KeyCode::Up | KeyCode::Down) => 1,
-            _ => current,
+        let area = self.panel_areas[current];
+        if area.is_empty() {
+            self.cycle_panel(matches!(direction, KeyCode::Right | KeyCode::Down));
+            return;
+        }
+        let center = |area: Rect| {
+            (
+                i32::from(area.x) * 2 + i32::from(area.width),
+                i32::from(area.y) * 2 + i32::from(area.height),
+            )
         };
-        self.active_agent = Agent::ALL[next];
-        self.selected = self.panel_selections[next];
-        self.clamp_selection();
-        self.hydrate_selected_preview();
+        let (x, y) = center(area);
+        let next = self
+            .panel_areas
+            .iter()
+            .enumerate()
+            .filter(|(index, area)| *index != current && !area.is_empty())
+            .filter_map(|(index, area)| {
+                let (xx, yy) = center(*area);
+                let dx = xx - x;
+                let dy = yy - y;
+                let valid = match direction {
+                    KeyCode::Left => dx < 0,
+                    KeyCode::Right => dx > 0,
+                    KeyCode::Up => dy < 0,
+                    KeyCode::Down => dy > 0,
+                    _ => false,
+                };
+                valid.then_some((
+                    index,
+                    if matches!(direction, KeyCode::Left | KeyCode::Right) {
+                        dy.abs() * 10000 + dx.abs()
+                    } else {
+                        dx.abs() * 10000 + dy.abs()
+                    },
+                ))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(index, _)| index);
+        if let Some(next) = next {
+            self.focus_agent(Agent::ALL[next]);
+        }
     }
 
     fn move_selection(&mut self, amount: isize) {
